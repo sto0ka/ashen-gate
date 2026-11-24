@@ -79,7 +79,25 @@ func _run() -> void:
 	await create_timer(0.35).timeout
 	assert(not is_instance_valid(ash) or not game.enemies.has(ash))
 
-	print("PHYSICS PASS: urn debris, Thermal Shock, Arbalest drop, Q Repulse push, Ash Sentinel immunity & Cauldron crush")
+	# Test Telekinetic Grasp (G) + Hurl + Explosive Alchemical Cask + Aether Dash (C)
+	game._change_stage(0)
+	for i in 4:
+		await process_frame
+	var cask: RigidBody3D = null
+	for b in game.breakables:
+		if is_instance_valid(b) and b.get_meta("explosive_cask", false):
+			cask = b
+			break
+	assert(cask != null)
+	game.held_body = cask
+	game._hurl_held()
+	assert(game.held_body == null and cask.linear_velocity.length() > 15.0)
+	game._smash_pot(cask)
+	assert(not is_instance_valid(cask) or not game.breakables.has(cask))
+	game._dash()
+	assert(game.dash_time > 0.1 and game.dash_cooldown > 0.5)
+
+	print("PHYSICS PASS: urn debris, Thermal Shock, Arbalest drop, Q Repulse, Ash Sentinel, Grasp/Hurl, Explosive Cask & Dash")
 	for i in 25:
 		await process_frame
 	for audio in game.sounds.values():

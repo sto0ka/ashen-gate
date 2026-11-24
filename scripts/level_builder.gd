@@ -237,6 +237,64 @@ static func add_rotten_barricade(game, pos: Vector3, bar_id: String, size: Vecto
 	bar.set_meta("loot", "flask" if is_secret else "green")
 	game.breakables.append(bar)
 
+# Half-Life 2 style Explosive Alchemical Cask — grab & hurl with G or shoot to detonate!
+static func add_explosive_cask(game, pos: Vector3, cask_id: String) -> void:
+	if game.level_states[game.stage].broken.has(cask_id):
+		return
+	var cask := RigidBody3D.new()
+	cask.name = "alchemical_cask_" + cask_id
+	cask.position = pos + Vector3(0, 0.55, 0)
+	cask.mass = 2.2
+	cask.linear_damp = 1.4
+	cask.angular_damp = 1.6
+	cask.contact_monitor = true
+	cask.max_contacts_reported = 4
+	cask.collision_layer = LAYER_PUSHABLE
+	cask.collision_mask = LAYER_WORLD | LAYER_ENEMY | LAYER_PUSHABLE | 32
+	if game.stone_physics_mat != null:
+		cask.physics_material_override = game.stone_physics_mat
+	game.level_root.add_child(cask)
+	cylinder(cask, "cask_body", Vector3.ZERO, 0.42, 1.05, game.mats.blood, false, 12)
+	cylinder(cask, "cask_band_top", Vector3(0, 0.34, 0), 0.45, 0.12, game.mats.iron, false, 12)
+	cylinder(cask, "cask_band_bot", Vector3(0, -0.34, 0), 0.45, 0.12, game.mats.iron, false, 12)
+	cylinder(cask, "cask_core", Vector3(0, 0.0, 0), 0.44, 0.24, game.mats.cinder, false, 12)
+	var col := CollisionShape3D.new()
+	var shape := CylinderShape3D.new()
+	shape.radius = 0.44
+	shape.height = 1.05
+	col.shape = shape
+	cask.add_child(col)
+	cask.set_meta("breakable", true)
+	cask.set_meta("explosive_cask", true)
+	cask.set_meta("id", cask_id)
+	cask.set_meta("loot", "none")
+	game.breakables.append(cask)
+
+# Crystallized Memory Echo — plays non-blocking real-time story transmission on approach
+static func add_memory_echo(game, pos: Vector3, echo_id: String, speaker: String, title: String, line: String, col_hex: String = "70d7df") -> void:
+	var holder := Node3D.new()
+	holder.name = "memory_echo_" + echo_id
+	holder.position = pos
+	game.level_root.add_child(holder)
+	var shard := cylinder(holder, "echo_crystal", Vector3(0, 1.15, 0), 0.24, 1.1, game.mats.mana, false, 6)
+	shard.rotation.z = 0.18
+	game._light(pos + Vector3(0, 1.2, 0), Color(col_hex), 1.8, 5.5)
+	var area := Area3D.new()
+	area.position = Vector3(0, 1.0, 0)
+	area.collision_layer = 0
+	area.collision_mask = 32
+	area.monitoring = true
+	var col := CollisionShape3D.new()
+	var shape := SphereShape3D.new()
+	shape.radius = 3.6
+	col.shape = shape
+	area.add_child(col)
+	holder.add_child(area)
+	area.body_entered.connect(func(body: Node3D) -> void:
+		if body == game.player:
+			game._on_memory_echo(echo_id, speaker, title, line, Color(col_hex))
+	)
+
 # ==============================================================================
 # LEVEL 1 (STAGE 0): THE SUNKEN COURT (Expanded 5-Zone Hub + 2 Secrets + Story)
 # ==============================================================================
@@ -275,12 +333,20 @@ static func build_sunken_court(game) -> void:
 	game._light(Vector3(-16.5, 2.4, -1.0), Color("53d98d"), 2.2, 8.0)
 	if not game.has_arbalest:
 		game._pickup(Vector3(-16.5, 1.6, -1.0), "arbalest", "court_arbalest")
-	# Secret Alcove #1 behind rotten barricade in NW Cistern
+	# Secret Alcove #1 behind rotten barricade in NW Cistern (houses Ashen Relic #1: Heart of Vaelor!)
 	box(root, "secret_w_wall", Vector3(-16.5, 3.5, -12.5), Vector3(14.0, 7.0, 1.0), game.mats.dark)
 	add_rotten_barricade(game, Vector3(-16.5, 1.2, -10.5), "court_secret_bar_1", Vector3(4.0, 2.4, 0.45), true)
 	game._pickup(Vector3(-20.5, 0.5, -15.5), "flask", "court_secret_flask_1")
+	game._pickup(Vector3(-17.5, 0.85, -15.5), "relic_heart", "relic_heart_vaelor")
 	game._pickup(Vector3(-14.5, 0.5, -15.5), "green", "court_secret_green_1")
 	game._inscription(Vector3(-17.5, 0, -16.5), "SECRET: THE KING'S EDICT", "King Vaelor ordered the Gate sealed while half the lower ward still breathed.\nWhen the Bell Warden's chime cracked, the seal inverted in vengeance.")
+
+	# Explosive Alchemical Casks & Memory Echoes in Level 1
+	add_explosive_cask(game, Vector3(-12.5, 0, 2.0), "court_cask_west")
+	add_explosive_cask(game, Vector3(4.5, 0, -10.5), "court_cask_north")
+	add_explosive_cask(game, Vector3(14.0, 0, 1.5), "court_cask_east")
+	add_memory_echo(game, Vector3(0, 0, 20.5), "echo_seraphina_1", "SERAPHINA (RESONANT STONE)", "THE INVERTED SEAL", "Cinder-Breaker, can you hear me? The seal is pulling the living inside. Grab heavy objects with [G] or hurl alchemical casks to survive—and find the Arbalest in the West Cistern.", "70d7df")
+	add_memory_echo(game, Vector3(13.5, 0, -11.5), "echo_malcor_1", "LORD MALCOR (BELL WARDEN)", "THE WARDEN'S WARNING", "You break into my ossuary like a grave-robber. Do you know what sleeps beneath the Kiln? Every toll of my bell keeps the Choir buried!", "d99cbd")
 
 	# --- ZONE 3: EAST SUNKEN OSSUARY & CATACOMBS (x: 9..23, z: -16..16) ---
 	box(root, "east_divider_n", Vector3(9.0, 3.5, -13.0), Vector3(1.2, 7.0, 10.0), game.mats.dark)
@@ -459,10 +525,19 @@ static func build_bell_tower(game) -> void:
 			game.shootable_targets.append(pipe)
 			game._light(Vector3(-24.5, 2.0, -2.2), Color("9ee9f5"), 2.0, 6.0)
 	game._inscription(Vector3(-21.0, 0, 5.5), "WARD I — THE GEAR JAM", "A rotating cogwheel guards the first Ward.\nHit the copper steam pipe with Frost (RMB) to freeze the gears solid.")
-	# Secret Gear-Vault behind rotten barricade in SW Clockwork Gallery
+	# Secret Gear-Vault behind rotten barricade in SW Clockwork Gallery (houses Ashen Relic #2: Siphon Signet!)
 	add_rotten_barricade(game, Vector3(-28.5, 1.2, 8.5), "tower_secret_bar_1", Vector3(3.6, 2.4, 0.45), true)
 	game._pickup(Vector3(-29.5, 0.5, 10.5), "flask", "tower_secret_flask_1")
+	game._pickup(Vector3(-28.0, 0.85, 10.5), "relic_siphon", "relic_siphon_signet")
 	game._pickup(Vector3(-26.5, 0.5, 10.5), "mana", "tower_secret_mana_1")
+
+	# Explosive Alchemical Casks & Memory Echoes in Level 2
+	add_explosive_cask(game, Vector3(-4.5, 0, 6.0), "tower_cask_nave")
+	add_explosive_cask(game, Vector3(4.5, 3.5, -14.5), "tower_cask_choir")
+	add_explosive_cask(game, Vector3(-7.0, 7.0, -35.0), "tower_cask_arena_w")
+	add_explosive_cask(game, Vector3(7.0, 7.0, -35.0), "tower_cask_arena_e")
+	add_memory_echo(game, Vector3(0, 0, 12.5), "echo_seraphina_2", "SERAPHINA (RESONANT STONE)", "THE THREE ANCHORS", "The Bell Tower is a giant resonator. Silence the three Wards in the West Clockwork Gallery, East Pendulum Foundry, and North Choir before stepping into the Belfry Sanctum.", "70d7df")
+	add_memory_echo(game, Vector3(0, 3.5, -18.5), "echo_malcor_2", "LORD MALCOR (BELL WARDEN)", "BEFORE THE SANCTUM", "King Vaelor gave me the bell and fled. Forty nights I have stood here as my flesh turned to ash—if you silence me, you must descend into the Kiln and finish what I could not!", "d99cbd")
 
 	# --- CHAMBER 3: EAST WING — PENDULUM FOUNDRY & WARD 2 (y = 0 -> y = 3.5, x: 16..32, z: -10..12) ---
 	archway(root, "east_wing_arch", Vector3(16.0, 0, 2.0), 8.0, 5.5, 1.4, game.mats.stone, game.mats.brass, PI * 0.5)
@@ -624,10 +699,18 @@ static func build_kiln_of_ash(game) -> void:
 	box(root, "aqueduct_pool", Vector3(-20.0, 0.04, -3.0), Vector3(14.0, 0.08, 20.0), game.mats.water, false)
 	box(root, "valve_platform", Vector3(-22.5, 2.0, -13.5), Vector3(7.5, 4.0, 6.0), game.mats.dark)
 	box(root, "aqueduct_rafter", Vector3(-15.5, 4.0, -13.5), Vector3(4.5, 0.5, 4.5), game.mats.timber)
-	# Secret Cistern Cache behind barricade
+	# Secret Cistern Cache behind barricade (houses Ashen Relic #3: Cinder-Breaker's Oath!)
 	add_rotten_barricade(game, Vector3(-24.0, 1.2, 12.0), "kiln_secret_bar_1", Vector3(4.2, 2.4, 0.45), true)
 	game._pickup(Vector3(-25.5, 0.5, 16.5), "flask", "kiln_secret_flask_1")
+	game._pickup(Vector3(-23.8, 0.85, 16.5), "relic_oath", "relic_cinder_oath")
 	game._pickup(Vector3(-22.0, 0.5, 16.5), "green", "kiln_secret_green_1")
+
+	# Explosive Alchemical Casks & Memory Echoes in Level 3
+	add_explosive_cask(game, Vector3(-3.5, 0, 5.5), "kiln_cask_center_w")
+	add_explosive_cask(game, Vector3(3.5, 0, -11.0), "kiln_cask_center_e")
+	add_explosive_cask(game, Vector3(16.0, 0, -2.5), "kiln_cask_smeltery")
+	add_memory_echo(game, Vector3(0, 0, 14.5), "echo_seraphina_3", "SERAPHINA (RESONANT STONE)", "THE TRUTH OF THE KILN", "Malcor was telling the truth... The kingdom didn't just bury the dead here. They smelted their memories into basalt to forge the Great Gate. Cool the mold, claim the Ashen Key, and break the cycle!", "70d7df")
+	add_memory_echo(game, Vector3(0, 0, -16.5), "echo_choir_1", "THE HOLLOW CHOIR", "BEYOND THE GREAT GATE", "A chorus of a thousand quiet voices hums behind the iron doors: 'Open the Gate, Cinder-Breaker. Give us back our names.'", "f0c27b")
 
 	var spout_positions := [
 		Vector3(-15.5, 1.0, 2.5),
