@@ -1,6 +1,9 @@
 class_name Visuals
 extends RefCounted
 
+const GODRAY_SHADER := preload("res://shaders/godray.gdshader")
+const LIGHTNING_SHADER := preload("res://shaders/lightning.gdshader")
+
 static var _blood_tex: ImageTexture
 static var _scorch_tex: ImageTexture
 static var _frost_tex: ImageTexture
@@ -87,44 +90,55 @@ static func _make_splat_texture(base: Color, seed_val: int) -> ImageTexture:
 				img.set_pixel(x, y, Color(minf(1.0, base.r * shade), minf(1.0, base.g * shade), minf(1.0, base.b * shade), a))
 	return ImageTexture.create_from_image(img)
 
-# Configure Forward+ Vulkan rendering: Volumetric Fog, SSAO, SSIL, SSR, ACES Filmic, Bloom, Dusk Sky!
-static func configure_environment(env: Environment, stage: int) -> void:
+# Chapter indices are zero-based; chapter IDs use the same three palettes.
+static func configure_environment(env: Environment, stage: Variant) -> void:
+	var chapter: int = 0
+	match stage:
+		0, "ch1_court":
+			chapter = 0
+		1, "ch2_tower":
+			chapter = 1
+		2, "ch3_kiln":
+			chapter = 2
+		_:
+			if stage is int:
+				chapter = 2
 	env.background_mode = Environment.BG_SKY
 	var sky := Sky.new()
 	var sky_mat := ProceduralSkyMaterial.new()
-	if stage == 0:
+	if chapter == 0:
 		sky_mat.sky_top_color = Color("0a1120")
-		sky_mat.sky_horizon_color = Color("2b364c")
+		sky_mat.sky_horizon_color = Color("36465e")
 		sky_mat.ground_bottom_color = Color("080b10")
 		sky_mat.ground_horizon_color = Color("1d2633")
 		env.fog_light_color = Color("2e3c4e")
 		env.fog_density = 0.012
 		env.volumetric_fog_albedo = Color("4f6480")
-		env.volumetric_fog_density = 0.017
-		env.ambient_light_color = Color("7b92b8")
-		env.ambient_light_energy = 0.60
-	elif stage == 1:
+		env.volumetric_fog_density = 0.014
+		env.ambient_light_color = Color("9eafca")
+		env.ambient_light_energy = 0.70
+	elif chapter == 1:
 		sky_mat.sky_top_color = Color("110a24")
-		sky_mat.sky_horizon_color = Color("3e2859")
+		sky_mat.sky_horizon_color = Color("49375f")
 		sky_mat.ground_bottom_color = Color("090612")
 		sky_mat.ground_horizon_color = Color("241738")
 		env.fog_light_color = Color("382854")
 		env.fog_density = 0.011
 		env.volumetric_fog_albedo = Color("664c88")
 		env.volumetric_fog_density = 0.016
-		env.ambient_light_color = Color("8c7bb0")
-		env.ambient_light_energy = 0.58
+		env.ambient_light_color = Color("afa2c7")
+		env.ambient_light_energy = 0.67
 	else:
 		sky_mat.sky_top_color = Color("1a0b0a")
-		sky_mat.sky_horizon_color = Color("522316")
+		sky_mat.sky_horizon_color = Color("673a2b")
 		sky_mat.ground_bottom_color = Color("100605")
 		sky_mat.ground_horizon_color = Color("381810")
 		env.fog_light_color = Color("46251c")
 		env.fog_density = 0.012
 		env.volumetric_fog_albedo = Color("78402e")
-		env.volumetric_fog_density = 0.018
-		env.ambient_light_color = Color("a07768")
-		env.ambient_light_energy = 0.60
+		env.volumetric_fog_density = 0.016
+		env.ambient_light_color = Color("c5a291")
+		env.ambient_light_energy = 0.70
 	sky_mat.sky_curve = 0.14
 	sky_mat.sun_angle_max = 18.0
 	sky.sky_material = sky_mat
@@ -140,8 +154,8 @@ static func configure_environment(env: Environment, stage: int) -> void:
 	env.volumetric_fog_detail_spread = 2.0
 	env.ssao_enabled = true
 	env.ssao_radius = 1.35
-	env.ssao_intensity = 2.2
-	env.ssao_power = 1.4
+	env.ssao_intensity = 1.25
+	env.ssao_power = 1.12
 	env.ssil_enabled = true
 	env.ssil_radius = 5.0
 	env.ssil_intensity = 1.1
@@ -155,11 +169,11 @@ static func configure_environment(env: Environment, stage: int) -> void:
 	env.glow_enabled = true
 	env.glow_intensity = 0.72
 	env.glow_strength = 1.0
-	env.glow_bloom = 0.24
+	env.glow_bloom = 0.10
 	env.glow_hdr_threshold = 0.85
-	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_SOFTLIGHT
+	env.glow_blend_mode = Environment.GLOW_BLEND_MODE_SCREEN
 	env.adjustment_enabled = true
-	env.adjustment_contrast = 1.12
+	env.adjustment_contrast = 1.04
 	env.adjustment_saturation = 1.10
 
 # Persistent Prodeus-style blood / scorch / frost decals projected onto stone floors & walls
@@ -267,3 +281,243 @@ static func spawn_impact_light(parent: Node3D, pos: Vector3, color: Color, energ
 	var tw := parent.create_tween().bind_node(l)
 	tw.tween_property(l, "light_energy", 0.0, duration)
 	tw.tween_callback(l.queue_free)
+
+
+static func make_pbr_stone_maps(rng: RandomNumberGenerator, base_color: Color, tex_size: int = 256) -> Dictionary:
+	var size := maxi(1, tex_size)
+	var albedo := Image.create(size, size, false, Image.FORMAT_RGB8)
+	var roughness := Image.create(size, size, false, Image.FORMAT_R8)
+	var heights := PackedFloat32Array()
+	heights.resize(size * size)
+	var noise := _rock_noise(rng)
+	var block_tints := PackedFloat32Array()
+	for index in 32:
+		block_tints.append(rng.randf_range(-0.08, 0.10))
+	var mortar := base_color.darkened(0.58).lerp(Color("333637"), 0.28)
+	var moss := base_color.darkened(0.32).lerp(Color("536247"), 0.57)
+	for y in size:
+		for x in size:
+			var u := (float(x) + 0.5) / float(size)
+			var v := (float(y) + 0.5) / float(size)
+			var torus := _tile_noise_position(u, v)
+			var broad := noise.get_noise_3dv(torus * 3.5)
+			var chips := noise.get_noise_3dv(torus * 37.0)
+			var grit := noise.get_noise_3dv(torus * 124.0)
+			var row_y := v * 8.0 + chips * 0.052
+			var row := floori(row_y)
+			var block_x := u * 4.0 + float(posmod(row, 2)) * 0.5 + chips * 0.065
+			var col := floori(block_x)
+			var joints := Vector2(0.5, 0.5) - (Vector2(fposmod(block_x, 1.0), fposmod(row_y, 1.0)) - Vector2(0.5, 0.5)).abs()
+			var edge_distance := minf(joints.x * 2.0, joints.y) - grit * 0.016
+			var bevel := smoothstep(0.028, 0.12, edge_distance)
+			var face := smoothstep(0.022, 0.064, edge_distance)
+			var tint := block_tints[posmod(row, 8) * 4 + posmod(col, 4)] + broad * 0.16 + grit * 0.07
+			var rock := base_color.lightened(maxf(tint, 0.0)).darkened(maxf(-tint, 0.0))
+			rock = rock.darkened((1.0 - bevel) * 0.25)
+			var weather := smoothstep(0.10, 0.40, broad + chips * 0.17 + (1.0 - bevel) * 0.17)
+			albedo.set_pixel(x, y, mortar.lerp(rock, face).lerp(moss, weather * 0.47 * (0.4 + face * 0.6)))
+			roughness.set_pixel(x, y, Color(lerpf(0.98, 0.72 + broad * 0.09 + grit * 0.12, bevel) + weather * 0.08, 0.0, 0.0))
+			heights[y * size + x] = bevel * 0.42 + face * broad * 0.12 + grit * 0.038
+	return _pbr_textures(albedo, roughness, heights)
+
+
+static func make_pbr_basalt_maps(rng: RandomNumberGenerator, tex_size: int = 256) -> Dictionary:
+	var size := maxi(1, tex_size)
+	var albedo := Image.create(size, size, false, Image.FORMAT_RGB8)
+	var roughness := Image.create(size, size, false, Image.FORMAT_R8)
+	var heights := PackedFloat32Array()
+	heights.resize(size * size)
+	var noise := _rock_noise(rng)
+	const CELLS := 7
+	var sites := PackedVector2Array()
+	var tints := PackedFloat32Array()
+	for index in CELLS * CELLS:
+		sites.append(Vector2(rng.randf_range(0.23, 0.77), rng.randf_range(0.23, 0.77)))
+		tints.append(rng.randf())
+	var soot := Color("232027")
+	var oxidized := Color("65483f")
+	var fissure := Color("100e13")
+	for y in size:
+		for x in size:
+			var u := (float(x) + 0.5) / float(size)
+			var v := (float(y) + 0.5) / float(size)
+			var torus := _tile_noise_position(u, v)
+			var strata := noise.get_noise_3dv(torus * 18.0)
+			var grit := noise.get_noise_3dv(torus * 155.0)
+			var p := Vector2(u, v) * float(CELLS) + Vector2(strata, noise.get_noise_3dv(torus * 27.0)) * 0.22
+			var cell := Vector2i(floori(p.x), floori(p.y))
+			var nearest := INF
+			var second := INF
+			var tint := 0.0
+			for dy in range(-1, 2):
+				for dx in range(-1, 2):
+					var other := cell + Vector2i(dx, dy)
+					var site := posmod(other.y, CELLS) * CELLS + posmod(other.x, CELLS)
+					var distance := p.distance_squared_to(Vector2(other) + sites[site])
+					if distance < nearest:
+						second = nearest
+						nearest = distance
+						tint = tints[site]
+					elif distance < second:
+						second = distance
+			var crack := second - nearest + grit * 0.018
+			var lip := smoothstep(0.011, 0.105, crack)
+			var color := soot.lerp(oxidized, clampf(0.12 + tint * 0.35 + strata * 0.48, 0.0, 0.82))
+			color = color.lightened(maxf(0.0, grit) * 0.10).darkened(maxf(0.0, -grit) * 0.24)
+			albedo.set_pixel(x, y, fissure.lerp(color, lip))
+			roughness.set_pixel(x, y, Color(lerpf(0.99, 0.81 + grit * 0.14 + strata * 0.12, lip), 0.0, 0.0))
+			heights[y * size + x] = lip * (0.43 + strata * 0.16) + grit * 0.09
+	return _pbr_textures(albedo, roughness, heights)
+
+
+static func _rock_noise(rng: RandomNumberGenerator) -> FastNoiseLite:
+	var noise := FastNoiseLite.new()
+	noise.seed = rng.randi_range(0, 2147483647)
+	noise.frequency = 1.0
+	noise.fractal_octaves = 3
+	return noise
+
+
+# A torus in noise space wraps both texture axes continuously.
+static func _tile_noise_position(u: float, v: float) -> Vector3:
+	var radius := 1.0 + cos(v * TAU) * 0.37
+	return Vector3(radius * cos(u * TAU), radius * sin(u * TAU), sin(v * TAU) * 0.37)
+
+
+static func _pbr_textures(albedo: Image, roughness: Image, heights: PackedFloat32Array) -> Dictionary:
+	var size := albedo.get_width()
+	var normal := Image.create(size, size, false, Image.FORMAT_RGB8)
+	var strength := 1.45 * float(size) / 256.0
+	for y in size:
+		var above := posmod(y - 1, size) * size
+		var below := ((y + 1) % size) * size
+		var row := y * size
+		for x in size:
+			var dx := heights[row + (x + 1) % size] - heights[row + posmod(x - 1, size)]
+			var dy := heights[below + x] - heights[above + x]
+			var n := Vector3(-dx * strength, -dy * strength, 1.0).normalized() * 0.5 + Vector3.ONE * 0.5
+			normal.set_pixel(x, y, Color(n.x, n.y, n.z))
+	albedo.generate_mipmaps()
+	roughness.generate_mipmaps()
+	normal.generate_mipmaps(true)
+	return {
+		"albedo": ImageTexture.create_from_image(albedo),
+		"normal": ImageTexture.create_from_image(normal),
+		"roughness": ImageTexture.create_from_image(roughness),
+	}
+
+
+# The narrow source sits on the local +Y end of the open shaft.
+static func spawn_godray(parent: Node3D, pos: Vector3, rot_deg: Vector3, radius: float = 1.6, length: float = 9.0, color: Color = Color(0.65, 0.78, 1.0, 0.22)) -> MeshInstance3D:
+	var shaft := MeshInstance3D.new()
+	var mesh := CylinderMesh.new()
+	mesh.top_radius = maxf(radius * 0.29, 0.001)
+	mesh.bottom_radius = maxf(radius, 0.001)
+	mesh.height = maxf(length, 0.001)
+	mesh.radial_segments = 32
+	mesh.rings = 0
+	mesh.cap_top = false
+	mesh.cap_bottom = false
+	var material := ShaderMaterial.new()
+	material.shader = GODRAY_SHADER
+	material.set_shader_parameter("shaft_color", color)
+	shaft.name = "godray"
+	shaft.mesh = mesh
+	shaft.material_override = material
+	shaft.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	shaft.position = pos
+	shaft.rotation_degrees = rot_deg
+	parent.add_child(shaft)
+	return shaft
+
+
+# Endpoints are in the parent's local coordinate system.
+static func spawn_lightning_arc(parent: Node3D, from: Vector3, to: Vector3, color: Color = Color("6bf0ff"), duration: float = 0.22) -> void:
+	var offset := to - from
+	var length := offset.length()
+	if length < 0.001 or duration <= 0.0:
+		return
+	var direction := offset / length
+	var axis := direction.cross(Vector3.UP if absf(direction.y) < 0.95 else Vector3.RIGHT).normalized()
+	var cross_axis := direction.cross(axis)
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+	var count := clampi(ceili(length * 3.0), 7, 24)
+	var points := PackedVector3Array([Vector3.ZERO])
+	var amplitude := minf(length * 0.12, 0.36)
+	for i in range(1, count):
+		var progress := float(i) / float(count)
+		var jitter := axis * rng.randf_range(-1.0, 1.0) + cross_axis * rng.randf_range(-1.0, 1.0)
+		points.append(offset * progress + jitter * amplitude * sin(progress * PI))
+	points.append(offset)
+
+	var bolt := MeshInstance3D.new()
+	bolt.name = "lightning_arc"
+	bolt.position = from
+	bolt.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var mesh := ImmediateMesh.new()
+	mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+	var width := clampf(length * 0.025, 0.035, 0.12)
+	_arc_ribbon(mesh, points, axis, width)
+	_arc_ribbon(mesh, points, cross_axis, width)
+	if length >= 1.0:
+		var split := points[count / 2]
+		var branch := PackedVector3Array([
+			split,
+			split + offset * 0.12 + axis * amplitude * 1.3,
+			split + offset * 0.22 + axis * amplitude * 1.1,
+			split + offset * 0.31 + axis * amplitude * 2.1 + cross_axis * amplitude,
+		])
+		_arc_ribbon(mesh, branch, axis, width * 0.5, 0.04)
+		_arc_ribbon(mesh, branch, cross_axis, width * 0.5, 0.04)
+	mesh.surface_end()
+	var material := ShaderMaterial.new()
+	material.shader = LIGHTNING_SHADER
+	material.set_shader_parameter("arc_color", color)
+	bolt.mesh = mesh
+	bolt.material_override = material
+	var flash := OmniLight3D.new()
+	flash.position = offset * 0.5
+	flash.light_color = color
+	flash.light_energy = 3.2
+	flash.omni_range = clampf(length * 0.7, 2.0, 8.0)
+	bolt.add_child(flash)
+	var fade_out := func() -> void:
+		var tween := bolt.create_tween().set_parallel()
+		var fade := func(value: float) -> void: material.set_shader_parameter("intensity", value)
+		tween.tween_method(fade, 1.0, 0.0, duration)
+		tween.tween_property(flash, "light_energy", 0.0, duration)
+		tween.chain().tween_callback(bolt.queue_free)
+	bolt.ready.connect(fade_out, CONNECT_ONE_SHOT)
+	parent.add_child(bolt)
+
+
+static func _arc_ribbon(mesh: ImmediateMesh, points: PackedVector3Array, axis: Vector3, width: float, tip_scale: float = 0.42) -> void:
+	var count := points.size() - 1
+	for i in count:
+		var start_uv := float(i) / float(count)
+		var end_uv := float(i + 1) / float(count)
+		var start_width := axis * width * lerpf(tip_scale, 1.0, sin(PI * start_uv))
+		var end_width := axis * width * lerpf(tip_scale, 1.0, sin(PI * end_uv))
+		var corners := PackedVector3Array([
+			points[i] - start_width, points[i] + start_width,
+			points[i + 1] - end_width, points[i + 1] + end_width,
+		])
+		var coords := PackedVector2Array([
+			Vector2(0.0, start_uv), Vector2(1.0, start_uv),
+			Vector2(0.0, end_uv), Vector2(1.0, end_uv),
+		])
+		for index: int in [0, 1, 2, 1, 3, 2]:
+			mesh.surface_set_uv(coords[index])
+			mesh.surface_add_vertex(corners[index])
+
+
+static func apply_graphics_settings(env: Environment, viewport: Viewport, settings: Dictionary) -> void:
+	if settings.has("volumetric_fog"):
+		env.volumetric_fog_enabled = bool(settings["volumetric_fog"])
+	if settings.has("ssr"):
+		env.ssr_enabled = bool(settings["ssr"])
+	if settings.has("ssao"):
+		env.ssao_enabled = bool(settings["ssao"])
+	if settings.has("msaa"):
+		viewport.msaa_3d = Viewport.MSAA_4X if bool(settings["msaa"]) else Viewport.MSAA_DISABLED

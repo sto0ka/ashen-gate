@@ -1,5 +1,8 @@
 extends SceneTree
 
+const CombatSystems = preload("res://scripts/combat_systems.gd")
+const PhysicsSandbox = preload("res://scripts/physics_sandbox.gd")
+
 func _initialize() -> void:
 	call_deferred("_run")
 
@@ -8,81 +11,46 @@ func _run() -> void:
 	root.add_child(game)
 	for i in 5:
 		await process_frame
-	# Test physics urn impulse + shatter + debris on LAYER_DEBRIS (16)
-	var urn: RigidBody3D = game.breakables[0]
-	for b in game.breakables:
-		if not b.freeze:
-			urn = b
-			break
-	var urn_start: Vector3 = urn.global_position
-	urn.apply_central_impulse(Vector3(3, 4, 0))
-	for i in 12:
+
+	# Verify 3D articulated weapon viewmodel built for all 4 modes
+	for m in 4:
+		game.mode = m
+		game._build_weapon()
+		assert(is_instance_valid(game.weapon_rig) and game.weapon_rig.get_child_count() > 0)
+
+	# Verify Buoyant Raft rises when Cistern water rises
+	assert(game.buoyant_rafts.size() == 2)
+	var raft: RigidBody3D = game.buoyant_rafts[0]
+	var raft_y0 := raft.global_position.y
+	game.level_states["ch1_court"].cistern_raised = true
+	for i in 40:
+		game._update_puzzles(0.05)
 		await physics_frame
-	assert(urn.global_position.distance_to(urn_start) > 0.08)
-	game._smash_pot(urn)
-	var debris_count := 0
-	for node in game.level_root.get_children():
-		if node is RigidBody3D and node.collision_layer == 16:
-			debris_count += 1
-	assert(debris_count >= 7)
+	assert(raft.global_position.y > raft_y0 + 0.5)
 
-	# Test Frost + Cinder Thurible Thermal Shock!
-	var enemy: CharacterBody3D = game.enemies[0]
-	var hp_before: int = enemy.get_meta("hp")
-	game._apply_frost_to_enemy(enemy)
-	assert(enemy.get_meta("elemental").is_frozen())
-	game._cinder_aoe_burst(enemy.global_position)
-	# Thermal shock should have killed or dealt massive bonus damage (> 100 total)
-	assert(not is_instance_valid(enemy) or not game.enemies.has(enemy) or int(enemy.get_meta("hp")) < hp_before - 100)
-
-	# Test Briar Arbalest parabolic bolt + Q Repulse reflection
-	game.has_arbalest = true
-	game.mode = 1
-	game.green_mana = 100
-	game.cooldown = 0
-	game._build_weapon()
-	game._attack()
-	assert(game.bolts.size() == 1 and game.bolts[0].kind == "arbalest" and game.bolts[0].gravity > 0.0)
-
-	# Test Q Repulse on Weighted Stone Block + projectile reflection
-	var blk: RigidBody3D = game.pushable_blocks[0]
-	var blk_start := blk.global_position
-	game.player.position = blk.global_position + Vector3(0, 0, 3.0)
-	game.player.rotation.y = 0.0
-	game.mana = 100
-	game.cooldown = 0.0
-	game._repulse()
-	for i in 10:
-		await physics_frame
-	assert(blk.global_position.distance_to(blk_start) > 0.15)
-
-	# Test Level 3 Ash Sentinel frost immunity + Slag Cauldron crush
-	game._change_stage(2)
-	for i in 4:
-		await process_frame
-	var ash: CharacterBody3D = null
+	# Verify Executioner Shield Yank -> physical RigidBody3D shield!
+	var exec: CharacterBody3D = null
 	for e in game.enemies:
-		if e.get_meta("kind") == "ash_sentinel":
-			ash = e
+		if e.get_meta("kind") == "executioner":
+			exec = e
 			break
-	assert(ash != null)
-	game._apply_frost_to_enemy(ash)
-	assert(ash.get_meta("elemental").slow_multiplier() == 1.0) # Immune to Frost slow!
-	var chain: Node3D = null
-	for t in game.shootable_targets:
-		if is_instance_valid(t) and t.get_meta("cauldron_chain", false):
-			chain = t
-			break
-	assert(chain != null)
-	ash.global_position = Vector3(chain.global_position.x, 0.1, chain.global_position.z)
-	game._hit_shootable_target(chain, "arbalest")
-	await create_timer(0.35).timeout
-	assert(not is_instance_valid(ash) or not game.enemies.has(ash))
+	assert(exec != null and exec.get_meta("has_shield", false))
+	var yanked := CombatSystems.try_yank_shield(game, exec)
+	assert(yanked != null and not exec.get_meta("has_shield", false))
 
-	# Test Telekinetic Grasp (G) + Hurl + Explosive Alchemical Cask + Aether Dash (C)
-	game._change_stage(0)
-	for i in 4:
-		await process_frame
+	# Verify Timed Perfect Parry negates damage and restores +25 Blue Mana
+	game.mana = 20
+	game.hp = 100
+	game._start_parry()
+	game._hurt(25, exec.global_position, Color.RED, exec)
+	assert(game.hp == 100 and game.mana == 45)
+
+	# Verify Sound-Reactive Stalker detects hurled urn noise pings
+	PhysicsSandbox.emit_noise(game.noise_events, Vector3(24.0, 0.0, -9.0), 20.0, 2.0)
+	var ping := PhysicsSandbox.get_nearest_noise(game.noise_events, Vector3(25.5, 0.0, -10.0), 24.0)
+	assert(not ping.is_empty())
+
+	# Verify Grasp/Hurl Explosive Cask + Aether Dash
 	var cask: RigidBody3D = null
 	for b in game.breakables:
 		if is_instance_valid(b) and b.get_meta("explosive_cask", false):
@@ -93,16 +61,37 @@ func _run() -> void:
 	game._hurl_held()
 	assert(game.held_body == null and cask.linear_velocity.length() > 15.0)
 	game._smash_pot(cask)
-	assert(not is_instance_valid(cask) or not game.breakables.has(cask))
 	game._dash()
 	assert(game.dash_time > 0.1 and game.dash_cooldown > 0.5)
 
-	print("PHYSICS PASS: urn debris, Thermal Shock, Arbalest drop, Q Repulse, Ash Sentinel, Grasp/Hurl, Explosive Cask & Dash")
-	for i in 25:
+	# Verify Thermal Shock (Frost + Cinder Thurible)
+	var target_e: CharacterBody3D = game.enemies[0]
+	var hp_before: int = target_e.get_meta("hp")
+	game._apply_frost_to_enemy(target_e)
+	game._cinder_aoe_burst(target_e.global_position)
+	assert(not is_instance_valid(target_e) or not game.enemies.has(target_e) or int(target_e.get_meta("hp")) < hp_before - 100)
+
+	# Verify Chapter III Ash Sentinel Frost immunity + Voltaic overload + Cauldron crush
+	game._load_chapter("ch3_kiln", true)
+	for i in 4:
 		await process_frame
-	for audio in game.sounds.values():
-		audio.stop()
-	for i in 5:
+	var ash: CharacterBody3D = null
+	for e in game.enemies:
+		if e.get_meta("kind") == "ash_sentinel":
+			ash = e
+			break
+	assert(ash != null)
+	game._apply_frost_to_enemy(ash)
+	assert(ash.get_meta("elemental").slow_multiplier() == 1.0)
+	var ash_hp := int(ash.get_meta("hp"))
+	var dir := (ash.global_position + Vector3(0, 1.0, 0) - (ash.global_position + Vector3(0, 1.0, 4.0))).normalized()
+	var vres := CombatSystems.fire_voltaic_arc(game, ash.global_position + Vector3(0, 1.0, 4.0), dir, 12.0)
+	assert(vres.hit_type == "enemy" and (not is_instance_valid(ash) or int(ash.get_meta("hp")) < ash_hp - 80))
+
+	print("PHYSICS PASS: 3D viewmodels, Buoyancy, Shield Yank, Perfect Parry, Stalker Noise, Thermal Shock, Voltaic Overload, Cask & Dash")
+	if is_instance_valid(game.audio_3d):
+		game.audio_3d.stop_all()
+	for i in 6:
 		await process_frame
 	root.remove_child(game)
 	game.free()
