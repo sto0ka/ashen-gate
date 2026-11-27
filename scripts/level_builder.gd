@@ -1407,6 +1407,17 @@ static func _landmark_drowned_ward(root: Node3D, timber: Material) -> void:
 	surface.material_override = water
 	surface.position = Vector3(0, -14, -30)
 	ward.add_child(surface)
+	var bed := StaticBody3D.new()
+	bed.name = "drowned_water_bed"
+	bed.position = surface.position - Vector3.UP * 0.2
+	bed.collision_layer = LAYER_WORLD
+	bed.collision_mask = 0
+	var bed_collider := CollisionShape3D.new()
+	var bed_shape := BoxShape3D.new()
+	bed_shape.size = Vector3(plane.size.x, 0.4, plane.size.y)
+	bed_collider.shape = bed_shape
+	bed.add_child(bed_collider)
+	ward.add_child(bed)
 	var roofs := _flat_mat(Color("1a1b20"), 0.85)
 	var walls := _flat_mat(Color("2a2a2f"), 0.95)
 	var rng := RandomNumberGenerator.new()

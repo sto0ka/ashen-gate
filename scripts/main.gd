@@ -18,6 +18,7 @@ const PauseMenu = preload("res://scripts/ui_menu.gd")
 const SaveSystem = preload("res://scripts/save_system.gd")
 
 const GRAVITY := 18.0
+const FATAL_FALL_SPEED := 26.5
 const HOT_KEY_MESSAGE := "ASHEN KEY STILL TEMPERING — TOO HOT TO HANDLE"
 const AXE_SWING_TIMES := [0.38, 0.38, 0.50]
 const FIRE_PATCH_RADIUS := 2.6
@@ -90,6 +91,8 @@ var won := false
 var dash_cooldown := 0.0
 var dash_time := 0.0
 var dash_dir := Vector3.ZERO
+var _fall_peak_speed: float = 0.0
+var _fall_grace_time: float = 0.0
 var held_body: RigidBody3D
 var held_was_hurled: Dictionary = {}
 
@@ -1388,13 +1391,13 @@ func _input(event: InputEvent) -> void:
 					unpick_held = true
 					_use()
 			KEY_R:
-				if won:
-					get_tree().reload_current_scene()
-				elif hp <= 0:
+				if hp <= 0:
 					if SaveSystem.has_checkpoint():
 						_load_game(true)
 					else:
 						get_tree().reload_current_scene()
+				elif won:
+					get_tree().reload_current_scene()
 	if event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
@@ -1411,6 +1414,11 @@ func _input(event: InputEvent) -> void:
 
 func _physics_process(delta: float) -> void:
 	var hud_visible := not (pause_menu.visible or map_overlay.visible or journal_panel.visible)
+	_fall_grace_time = maxf(0.0, _fall_grace_time - delta)
+	if hp <= 0:
+		player.velocity = Vector3.ZERO
+	elif hud_visible:
+		_check_abyss()
 	narrative.set_gameplay_hud_visible(hud_visible and not story_director.is_transitioning())
 	if hud_visible and hp > 0:
 		story_director.step_physics(delta)
@@ -1537,7 +1545,18 @@ func _physics_process(delta: float) -> void:
 
 	var was_grounded := player.is_on_floor()
 	var falling_speed := player.velocity.y
+	if not was_grounded:
+		_fall_peak_speed = maxf(_fall_peak_speed, maxf(0.0, -falling_speed))
 	player.move_and_slide()
+	if _check_abyss():
+		return
+	if not was_grounded and player.is_on_floor():
+		var impact_speed := maxf(_fall_peak_speed, absf(falling_speed))
+		_fall_peak_speed = 0.0
+		if impact_speed > 3.0:
+			_play_landing(impact_speed)
+			if hp <= 0:
+				return
 
 	for index in player.get_slide_collision_count():
 		var collision := player.get_slide_collision(index)
@@ -1546,11 +1565,6 @@ func _physics_process(delta: float) -> void:
 			if not buoyant_rafts.has(body):
 				body.apply_central_impulse(-collision.get_normal() * minf(6.5, current.length() * 0.45))
 
-	if not was_grounded and player.is_on_floor() and falling_speed < -3.0:
-		camera_shake = maxf(camera_shake, minf(0.14, absf(falling_speed) * 0.012))
-		landing_dip = 0.11
-		_sound("land")
-		PhysicsSandbox.emit_noise(noise_events, player.global_position, 14.0, 1.3)
 	landing_dip = maxf(0.0, landing_dip - delta * 0.45)
 
 	var bob_amp := 0.032 if sprinting else 0.045
@@ -2006,6 +2020,8 @@ func _load_chapter(new_chapter_id: String, reset_spawn: bool = true, show_title_
 
 func _reset_arrival_motion() -> void:
 	player.velocity = Vector3.ZERO
+	_fall_peak_speed = 0.0
+	_fall_grace_time = 1.2
 	dash_time = 0.0
 	dash_cooldown = 0.0
 	dash_dir = Vector3.ZERO
@@ -3073,6 +3089,83 @@ func _damage_enemy(enemy: CharacterBody3D, damage: int, knockback: bool = true) 
 			enemy.queue_free()
 			_message("FOE VANQUISHED", 1.0)
 
+func _play_landing(impact_speed: float) -> void:
+	camera_shake = maxf(camera_shake, minf(0.14, impact_speed * 0.012))
+	landing_dip = 0.11
+	var pos := player.global_position
+	PhysicsSandbox.emit_noise(noise_events, pos, 14.0, 1.3)
+	var wet := _is_wet_landing(pos)
+	if wet:
+		_sound("splash")
+	var ash_heap := chapter_id == "ch3_kiln" and pos.distance_to(Vector3(0, 6.0, 25.4)) < 2.8
+	if _fall_grace_time > 0.0 or impact_speed < 13.0 or ash_heap:
+		_sound("land")
+		return
+	var fall_dmg := clampi(roundi((impact_speed - 12.2) * 7.5), 10, 120)
+	if wet:
+		fall_dmg = roundi(fall_dmg * 0.5)
+	elif impact_speed >= FATAL_FALL_SPEED:
+		fall_dmg = maxi(fall_dmg, hp)
+	_apply_fall_damage(fall_dmg)
+
+func _is_wet_landing(pos: Vector3) -> bool:
+	for zone: Dictionary in wet_zones:
+		if not zone.get("active", true) or zone.get("frozen", false) or float(zone.get("frozen_timer", 0.0)) > 0.0:
+			continue
+		var center: Vector3 = zone.pos
+		var half: Vector2 = zone.half
+		if absf(pos.x - center.x) <= half.x and absf(pos.z - center.z) <= half.y:
+			var surface_y := center.y
+			if is_instance_valid(cistern_water_node):
+				var cistern := cistern_water_node.global_position
+				if Vector2(center.x, center.z).is_equal_approx(Vector2(cistern.x, cistern.z)):
+					surface_y = cistern.y
+			if pos.y >= surface_y - 2.4 and pos.y <= surface_y + 0.15:
+				return true
+	return false
+
+func _apply_fall_damage(fall_dmg: int, death_msg: String = "YOU FELL TO YOUR DEATH  •  PRESS R TO LOAD CHECKPOINT") -> void:
+	if hp <= 0:
+		return
+	_sound("land")
+	var tint := Color(0.75, 0.1, 0.05)
+	if fall_dmg >= hp:
+		_kill_player_by_fall(death_msg, tint)
+		return
+	hp -= fall_dmg
+	flash = 1.0
+	flash_color = tint
+	camera_shake = maxf(camera_shake, 0.18)
+	_sound("hurt")
+	_refresh_hud_numbers()
+
+func _chapter_kill_y() -> float:
+	return -6.0 if chapter_id == "ch3_kiln" else -11.5
+
+func _check_abyss() -> bool:
+	if player.global_position.y >= _chapter_kill_y():
+		return false
+	if chapter_id == "ch3_kiln":
+		_kill_player_by_fall("YOU FELL INTO THE ABYSS  •  PRESS R TO LOAD CHECKPOINT", Color(0.85, 0.25, 0.08))
+	else:
+		_kill_player_by_fall("YOU FELL INTO THE SUNKEN ABYSS  •  PRESS R TO LOAD CHECKPOINT", Color(0.15, 0.35, 0.55))
+	return true
+
+func _kill_player_by_fall(death_text: String, tint: Color) -> void:
+	if hp <= 0:
+		return
+	hp = 0
+	player.velocity = Vector3.ZERO
+	flash = 1.0
+	flash_color = tint
+	camera_shake = maxf(camera_shake, 0.28)
+	_sound("hurt")
+	if chapter_id != "ch3_kiln" and player.global_position.y < _chapter_kill_y():
+		_sound("splash")
+	_refresh_hud_numbers()
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	_message(death_text, 9999.0)
+
 func _hurt(amount: int, source: Vector3 = Vector3.ZERO, tint: Color = Color(0.75, 0.1, 0.05), attacker: CharacterBody3D = null) -> void:
 	if CombatSystems.evaluate_parry(self, attacker, amount):
 		_refresh_hud_numbers()
@@ -3279,6 +3372,7 @@ func _load_game(from_checkpoint: bool = false) -> void:
 	if data.is_empty():
 		_message("NO SAVED GAME FOUND", 2.0)
 		return
+	_message("", 0.0)
 	_init_level_states()
 	var saved_states: Dictionary = data.get("level_states", {})
 	for cid: String in saved_states:

@@ -638,29 +638,35 @@ static func _foundry_rim(game, root: Node3D, st: Dictionary) -> void:
 	game._light(Vector3(-4, 3.6, 21), FURNACE_LIGHT, 1.6, 9.0)
 	game._light(Vector3(5, 3.6, 21), FURNACE_LIGHT, 1.3, 9.0)
 	# South wall (full width so it also closes both stair towers).
-	L.box(root, "rim_south_wall_low", Vector3(0, 3.0, 27.0), Vector3(35.2, 6.0, 1.0), basalt)
+	L.box(root, "rim_south_wall_low", Vector3(0, 2.25, 27.0), Vector3(35.2, 7.5, 1.0), basalt)
 	L.box(root, "rim_south_wall_w", Vector3(-6.0, 10.0, 27.0), Vector3(23.2, 8.0, 1.0), basalt)
 	L.box(root, "rim_south_wall_e", Vector3(13.4, 10.0, 27.0), Vector3(8.4, 8.0, 1.0), basalt)
-	L.box(root, "archive_door_lintel", Vector3(7.4, 12.0, 27.0), Vector3(3.6, 4.0, 1.0), basalt)
+	L.box(root, "archive_door_lintel", Vector3(7.4, 11.9, 27.0), Vector3(3.6, 4.2, 1.0), basalt)
 	for side: float in [-1.0, 1.0]:
 		var x := 11.4 * side
-		L.box(root, "rim_side_wall_low", Vector3(x, 3.0, 20.4), Vector3(1.0, 6.0, 13.2), basalt)
+		L.box(root, "rim_side_wall_low", Vector3(x, 2.25, 20.4), Vector3(1.0, 7.5, 13.2), basalt)
 		L.box(root, "rim_side_wall_high", Vector3(x, 10.0, 18.55), Vector3(1.0, 8.0, 9.5), basalt)
-		L.box(root, "rim_stair_door_lintel", Vector3(x, 12.0, 24.95), Vector3(1.0, 4.0, 3.3), basalt)
+		L.box(root, "rim_stair_door_lintel", Vector3(x, 11.8, 24.95), Vector3(1.0, 4.4, 3.3), basalt)
 		L.box(root, "rim_side_wall_corner", Vector3(x, 10.0, 26.8), Vector3(1.0, 8.0, 0.4), basalt)
 		L.archway(root, "rim_stair_door", Vector3(x, RIM_Y, 24.95), 3.3, 3.6, 1.0, basalt, brass, PI * 0.5)
 		# Stair tower: landing outside the rim wall, then a guarded flight north
 		# through the wing's end wall down to the wing floor.
 		var cx := 15.0 * side
-		L.slab(root, "rim_stair_landing", Rect2(minf(11.4 * side, 17.6 * side), 22.9, 6.2, 4.1), RIM_Y, basalt)
-		L.box(root, "rim_stair_tower_wall", Vector3(17.6 * side, 7.0, 22.7), Vector3(0.8, 14.0, 9.4), basalt)
+		L.slab(root, "rim_stair_landing", Rect2(minf(11.4 * side, 17.6 * side), 23.12, 6.2, 3.88), RIM_Y, basalt)
+		L.box(root, "rim_stair_landing_rail", Vector3(12.35 * side, RIM_Y + 0.55, 23.15), Vector3(1.1, 1.2, 0.36), iron)
+		L.box(root, "rim_stair_landing_rail", Vector3(17.35 * side, RIM_Y + 0.55, 23.15), Vector3(0.6, 1.2, 0.36), iron)
+		L.box(root, "rim_stair_tower_wall", Vector3(17.6 * side, 6.25, 22.75), Vector3(0.8, 15.5, 9.5), basalt)
 		var stair_name := "west_rim_stair" if side < 0.0 else "east_gantry_stair"
 		var step_mat: Material = game.mats.stone if side < 0.0 else iron
-		L.staircase(root, stair_name, Vector3(cx, RIM_Y, 23.0), Vector3(cx, 0.0, 12.6), 4.0, step_mat, iron)
+		L.staircase(root, stair_name, Vector3(cx, RIM_Y, 22.95), Vector3(cx, 0.0, 12.6), 4.0, step_mat, iron)
 		# Solid soffit under the flight so nothing can wedge beneath it.
 		var soffit := L.box(root, stair_name + "_soffit", Vector3(cx, 1.3, 18.65), Vector3(4.0, 3.0, 10.0), basalt)
 		soffit.rotation.x = -atan2(6.0, 10.4)
-		L.slab(root, "rim_stair_tower_floor", Rect2(minf(11.4 * side, 17.6 * side), 18.0, 6.2, 9.0), 0.0, basalt)
+		L.slab(root, "rim_stair_tower_floor", Rect2(minf(11.4 * side, 17.6 * side), 17.5, 6.2, 9.5), 0.0, basalt)
+		# Frame the flight where it passes through the wing's south wall.
+		for edge_x: float in [12.75, 17.25]:
+			L.box(root, "rim_stair_tower_jamb", Vector3(edge_x * side, 4.05, 20.0), Vector3(0.6, 11.1, 6.1), basalt)
+		L.box(root, "rim_stair_tower_header", Vector3(14.6 * side, 7.7, 18.0), Vector3(6.0, 3.8, 1.0), basalt)
 		L.hanging_chain_lamp(game, root, Vector3(cx, 8.6, 24.8), 2.2, FURNACE_LIGHT if side > 0.0 else AQUEDUCT_LIGHT, 3.2, 10.0)
 		game._light(Vector3(cx, 3.4, 16.0), FURNACE_LIGHT if side > 0.0 else AQUEDUCT_LIGHT, 1.8, 9.0)
 	# Rim rail at z 14.4: intact west, the Pour Stair opening, the bent section the
@@ -703,7 +709,7 @@ static func _foundry_rim(game, root: Node3D, st: Dictionary) -> void:
 static func _drop_throat(game, root: Node3D, sd: Object) -> void:
 	var basalt: Material = game.mats.basalt
 	for x: float in [-2.75, 2.75]:
-		L.box(root, "drop_throat_wall", Vector3(x, 11.0, 25.5), Vector3(0.5, 10.0, 3.4), basalt)
+		L.box(root, "drop_throat_wall", Vector3(x, 11.0, 25.4), Vector3(0.6, 10.0, 3.6), basalt)
 	L.box(root, "drop_throat_header", Vector3(0, 13.0, 23.95), Vector3(6.0, 5.0, 0.5), basalt)
 	L.box(root, "drop_throat_back", Vector3(0, 15.0, 26.7), Vector3(6.0, 2.0, 0.6), basalt)
 	# Broken iron grate at y 12, two bars torn downward.
@@ -798,14 +804,16 @@ static func _ash_footprints(game, root: Node3D) -> void:
 
 static func _archive_stair(game, root: Node3D, sd: Object) -> void:
 	var basalt: Material = game.mats.basalt
-	L.slab(root, "archive_stair_sill", Rect2(5.6, 26.4, 3.6, 1.6), RIM_Y, basalt)
+	L.slab(root, "archive_stair_sill", Rect2(5.45, 26.4, 3.9, 1.7), RIM_Y, basalt)
 	for x: float in [5.4, 9.4]:
-		L.box(root, "archive_recess_wall", Vector3(x, 9.5, 30.0), Vector3(0.4, 7.0, 6.0), basalt)
-	L.box(root, "archive_recess_back", Vector3(7.4, 9.5, 33.2), Vector3(4.4, 7.0, 0.4), basalt)
-	L.box(root, "archive_recess_roof", Vector3(7.4, 12.6, 30.0), Vector3(4.4, 0.4, 6.4), basalt, false)
+		L.box(root, "archive_recess_wall", Vector3(x, 9.5, 30.2), Vector3(0.4, 7.0, 6.8), basalt)
+	# Back wall: front face at z 32.75, 0.8 m deep; the landing runs on under it
+	# so the landing has no open rear edge.
+	L.box(root, "archive_recess_back", Vector3(7.4, 9.5, 33.15), Vector3(4.0, 7.2, 0.8), basalt)
+	L.box(root, "archive_recess_roof", Vector3(7.4, 12.6, 30.2), Vector3(4.4, 0.4, 6.8), basalt)
 	L.staircase(root, "archive_service_stair", Vector3(7.4, RIM_Y, 28.0), Vector3(7.4, 7.8, 31.0), 2.8, game.mats.stone, game.mats.iron)
-	L.slab(root, "archive_stair_landing", Rect2(5.6, 30.9, 3.6, 2.1), 7.8, basalt)
-	L.slab(root, "archive_stair_undercroft", Rect2(5.6, 27.5, 3.6, 3.4), RIM_Y - 0.25, basalt, 0.5)
+	L.slab(root, "archive_stair_landing", Rect2(5.45, 30.9, 3.9, 2.5), 7.8, basalt)
+	L.slab(root, "archive_stair_undercroft", Rect2(5.45, 27.4, 3.9, 3.65), RIM_Y - 0.25, basalt, 0.5)
 	L.archway(root, "archive_service_arch", Vector3(7.4, RIM_Y, 26.45), 3.2, 3.8, 0.5, basalt, game.mats.brass)
 	L.hanging_chain_lamp(game, root, Vector3(7.4, 11.2, 30.2), 1.0, Color("ffd9a8"), 2.4, 7.0)
 	game._light(Vector3(7.4, 9.6, 32.4), Color("9fb7ff"), 0.9, 4.0)
@@ -832,16 +840,27 @@ static func _crucible_hall(game, root: Node3D, st: Dictionary) -> void:
 	rising.set_meta("lowered_y", -1.8)
 	rising.set_meta("raised_y", -1.8 if st.colossus_dead else -0.14)
 	root.add_child(rising)
+	# The surge first emerges when its top reaches the resting river surface.
+	L.watch_puzzle(rising, func() -> void:
+		rising.visible = rising.position.y > -0.595
+	)
 	game.rising_slag_node = rising
 	for x: float in [-10, 10]:
 		L.slab(root, "slag_river_bed", Rect2(x - 2, -20.8, 4, 34.8), -0.74, game.mats.basalt)
 		L.box(root, "slag_river", Vector3(x, -0.58, -3.4), Vector3(3.65, 0.11, 34.8), game.mats.slag, false)
 		L.box(rising, "rising_slag_river", Vector3(x, 0, -3.4), Vector3(3.75, 0.14, 34.8), game.mats.slag, false)
 		game.slag_zones.append({"pos": Vector3(x, 0, -3.4), "half": Vector2(1.9, 17.35)})
+		var wall_x := signf(x) * 12.1
+		# Lap into the forecourt return, both bridge piers and the low rim wall.
+		for span: Vector2 in [Vector2(-21.2, -11.8), Vector2(-8.2, 2.2), Vector2(5.8, 14.2)]:
+			L.box(root, "slag_channel_wall", Vector3(wall_x, 4.5, (span.x + span.y) * 0.5),
+				Vector3(0.8, 12.0, span.y - span.x), game.mats.basalt)
 		for z: float in [-14, -3, 10]:
 			game._light(Vector3(x, 1.25, z), Color("ff642a"), 2.6, 10.5)
 		for z: float in [-10, 4]:
 			L.slab(root, "slag_bridge", Rect2(x - 2.55, z - 1.86, 5.1, 3.72), 0.29, game.mats.iron, 0.28)
+			L.box(root, "slag_bridge_sill", Vector3(wall_x, -0.75, z), Vector3(0.8, 1.5, 3.8), game.mats.basalt)
+			L.box(root, "slag_bridge_header", Vector3(wall_x, 7.575, z), Vector3(0.8, 5.85, 3.8), game.mats.basalt)
 			L.archway(root, "slag_bridge_mouth", Vector3(x * 1.165, 0.25, z), 4.6, 4.45, 0.9, game.mats.basalt, game.mats.brass, PI * 0.5)
 	for z: float in [9, -2, -14]:
 		L.vaulted_rib(root, Vector3(0, 6.65, z), 15.3, 5.2, game.mats.basalt, game.mats.iron)
@@ -1050,9 +1069,9 @@ static func _embedded_bell(game, root: Node3D, sd: Object) -> void:
 static func _aqueduct(game, root: Node3D, st: Dictionary) -> void:
 	var sd: Object = _sd(game) if bool(root.get_meta("sd_bound", false)) else null
 	L.slab(root, "aqueduct_floor", Rect2(-32, -18, 20.15, 36), 0, game.mats.stone)
-	L.box(root, "aqueduct_outer_wall", Vector3(-32, 4.75, 0), Vector3(1, 9.5, 36), game.mats.basalt)
-	L.box(root, "aqueduct_end_wall", Vector3(-22, 4.75, -18), Vector3(20, 9.5, 1), game.mats.basalt)
-	L.box(root, "aqueduct_end_wall_s", Vector3(-24.65, 4.75, 18), Vector3(14.7, 9.5, 1), game.mats.basalt)
+	L.box(root, "aqueduct_outer_wall", Vector3(-32, 4.0, 0), Vector3(1, 11.0, 37.0), game.mats.basalt)
+	L.box(root, "aqueduct_end_wall", Vector3(-21.75, 4.0, -18), Vector3(20.5, 11.0, 1), game.mats.basalt)
+	L.box(root, "aqueduct_end_wall_s", Vector3(-24.65, 4.0, 18), Vector3(14.7, 11.0, 1), game.mats.basalt)
 	var pool := Vector3(-22.1, 0.04, -2.2)
 	L.box(root, "aqueduct_pool", pool, Vector3(16.4, 0.08, 22.8), game.mats.water, false)
 	L.add_wet_zone(game, pool, Vector2(8.2, 11.4))
@@ -1104,8 +1123,8 @@ static func _aqueduct(game, root: Node3D, st: Dictionary) -> void:
 	L.focus_light(root, Vector3(-16.75, 5.65, 7.9), pump.position, AQUEDUCT_LIGHT, 6.0, 23.0, 1.5)
 	L.focus_light(root, Vector3(-26.2, 8.05, -9.75), valve.position + Vector3.UP * 1.35, AQUEDUCT_LIGHT, 4.9, 23.0, 0.62)
 	game._inscription(Vector3(-21, 0, 8.4), "THE AQUEDUCT OF THE QUENCH", "\"Cold water makes a name hold its shape.\" — Kiln-Master Orrun")
-	L.box(root, "secret_cistern_west_wall", Vector3(-30.25, 2.1, 14.5), Vector3(1, 4.2, 6.8), game.mats.dark)
-	L.box(root, "secret_cistern_east_wall", Vector3(-24.7, 2.1, 14.5), Vector3(1, 4.2, 6.8), game.mats.dark)
+	L.box(root, "secret_cistern_west_wall", Vector3(-30.25, 1.35, 14.5), Vector3(1, 5.7, 6.8), game.mats.dark)
+	L.box(root, "secret_cistern_east_wall", Vector3(-24.7, 1.35, 14.5), Vector3(1, 5.7, 6.8), game.mats.dark)
 	L.add_rotten_barricade(game, Vector3(-27.48, 1.2, 11.4), "kiln_secret_bar_1", Vector3(4.85, 2.4, 0.45), true)
 	L.focus_light(root, Vector3(-28.7, 4.75, 9.6), Vector3(-27.48, 1.2, 11.4), AQUEDUCT_LIGHT, 2.15, 21.0)
 	game._pickup(Vector3(-27.5, 0.85, 16.2), "relic_oath", "relic_cinder_oath")
@@ -1247,12 +1266,14 @@ static func _smeltery(game, root: Node3D, st: Dictionary) -> void:
 	var sd: Object = _sd(game) if bool(root.get_meta("sd_bound", false)) else null
 	L.slab(root, "smeltery_rail_bed", Rect2(11.85, -18.5, 11.15, 36.5), 0, game.mats.basalt)
 	L.slab(root, "smeltery_magma_bed", Rect2(23, -18.5, 9, 36.5), -0.65, game.mats.basalt)
-	L.box(root, "smeltery_magma", Vector3(27.5, -0.49, -0.25), Vector3(9, 0.14, 36.5), game.mats.slag, false)
+	# End the visible liquid just inside the wall faces. The bed continues beneath them.
+	var magma_span := Vector3(8.49, 0.14, 35.48)
+	L.box(root, "smeltery_magma", Vector3(27.245, -0.49, -0.25), magma_span, game.mats.slag, false)
 	game.slag_zones.append({"pos": Vector3(27.5, 0, 0), "half": Vector2(4.5, 18.25)})
-	L.box(game.rising_slag_node, "smeltery_slag_rise", Vector3(27.5, 0, 0), Vector3(9, 0.14, 36), game.mats.slag, false)
-	L.box(root, "smeltery_outer_wall", Vector3(32, 4.75, -0.25), Vector3(1, 9.5, 36.5), game.mats.basalt)
-	L.box(root, "smeltery_end_wall", Vector3(22, 4.75, -18.5), Vector3(20, 9.5, 1.0), game.mats.basalt)
-	L.box(root, "smeltery_end_wall_s", Vector3(24.65, 4.75, 18), Vector3(14.7, 9.5, 1.0), game.mats.basalt)
+	L.box(game.rising_slag_node, "smeltery_slag_rise", Vector3(27.245, 0, -0.25), magma_span, game.mats.slag, false)
+	L.box(root, "smeltery_outer_wall", Vector3(32, 4.0, -0.25), Vector3(1, 11.0, 37.5), game.mats.basalt)
+	L.box(root, "smeltery_end_wall", Vector3(21.75, 4.0, -18.5), Vector3(20.5, 11.0, 1.0), game.mats.basalt)
+	L.box(root, "smeltery_end_wall_s", Vector3(24.65, 4.0, 18), Vector3(14.7, 11.0, 1.0), game.mats.basalt)
 	L.slab(root, "smeltery_outer_catwalk", Rect2(28, -14.4, 3.6, 27.8), 0.45, game.mats.iron)
 	for z: float in [-12.8, -4.7, 10.7]:
 		_gantry(game, root, Vector3(23.45, 6.75, z), 16.1, 1.9)
@@ -1429,8 +1450,8 @@ static func _forecourt(game, root: Node3D) -> void:
 	var sd: Object = _sd(game) if bool(root.get_meta("sd_bound", false)) else null
 	L.slab(root, "gate_forecourt", Rect2(-13, -38.6, 26, 18.1), 0, game.mats.basalt)
 	for x: float in [-12.8, 12.8]:
-		L.box(root, "forecourt_side_wall", Vector3(x, 4.7, -29.4), Vector3(1.1, 9.4, 18.4), game.mats.basalt)
-		L.box(root, "forecourt_south_wall", Vector3(x * 0.76, 4.7, -20.55), Vector3(6.7, 9.4, 0.9), game.mats.basalt)
+		L.box(root, "forecourt_side_wall", Vector3(x, 3.95, -29.4), Vector3(1.1, 10.9, 18.4), game.mats.basalt)
+		L.box(root, "forecourt_south_wall", Vector3(x * 0.76, 3.95, -20.55), Vector3(6.7, 10.9, 0.9), game.mats.basalt)
 		for z: float in [-25.5, -33.9]:
 			L.cylinder(root, "forecourt_pillar", Vector3(x * 0.55, 3.05, z), 0.85, 6.1, game.mats.basalt, true, 12)
 			game._torch(Vector3(x * 0.64, 2.9, z))
@@ -1476,12 +1497,12 @@ static func _great_gate(game, root: Node3D, st: Dictionary) -> void:
 	var sd: Object = _sd(game) if bool(root.get_meta("sd_bound", false)) else null
 	L.slab(root, "ashen_threshold", Rect2(-7.1, -43, 14.2, 5), 0, game.mats.basalt)
 	for x: float in [-9.7, 9.7]:
-		L.box(root, "great_gate_jamb", Vector3(x, 5.15, -38), Vector3(6.45, 10.3, 1.9), game.mats.basalt)
-		L.box(root, "threshold_side", Vector3(x * 0.731, 3, -40.5), Vector3(0.8, 6, 5.1), game.mats.basalt)
+		L.box(root, "great_gate_jamb", Vector3(x, 4.4, -38), Vector3(6.45, 11.8, 1.9), game.mats.basalt)
+		L.box(root, "threshold_side", Vector3(x * 0.731, 2.25, -40.5), Vector3(0.8, 7.5, 5.1), game.mats.basalt)
 		L.gothic_buttress(root, Vector3(x * 1.21, 0, -37.05), 9.8, 2.4, game.mats.basalt, game.mats.iron)
 		_monumental_brazier(game, root, Vector3(x * 1.04, 0, -34.0))
 	L.focus_light(root, Vector3(0, 9.9, -33.5), Vector3(0, 2.4, -37.2), Color("f1c4ff"), 6.3, 28.0, 1.45)
-	L.box(root, "great_gate_crown", Vector3(0, 9.1, -38), Vector3(14, 2.2, 1.9), game.mats.basalt)
+	L.box(root, "great_gate_crown", Vector3(0, 9.05, -38), Vector3(14, 2.3, 1.9), game.mats.basalt)
 	L.vaulted_rib(root, Vector3(0, 6.8, -36.85), 13, 5.2, game.mats.basalt, game.mats.brass)
 	var left := L.box(root, "great_gate_left", Vector3(-3.3, 4, -38), Vector3(6.6, 8, 1), game.mats.iron) as StaticBody3D
 	var right := L.box(root, "great_gate_right", Vector3(3.3, 4, -38), Vector3(6.6, 8, 1), game.mats.iron) as StaticBody3D
