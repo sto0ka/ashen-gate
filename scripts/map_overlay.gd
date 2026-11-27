@@ -7,6 +7,17 @@ const PORTAL := Color("c68ae3")
 const WARD := Color("c68ae3")
 const FONT := Color("73ded6")
 const NPC := Color("dca3c6")
+const SERAPHINA := Color("63d8ff")
+const TORIN := Color("f0a85a")
+const MALCOR := Color("a3809a")
+const EXIT_OPEN := Color("f2c46b")
+const EXIT_RIM := Color("fff0c2")
+const EXIT_LOCKED := Color("6f6a5e")
+const EXIT_OUTLINE := Color("111619")
+const ARCH_OUTLINE := [
+	Vector2(-7, 8), Vector2(-7, -1), Vector2(-6.3, -5), Vector2(-4.3, -8.4), Vector2(-2, -10.3), Vector2(0, -11.5),
+	Vector2(2, -10.3), Vector2(4.3, -8.4), Vector2(6.3, -5), Vector2(7, -1), Vector2(7, 8),
+]
 const BOSS := Color("ef876f")
 const OBJECTIVE := Color("ffd47f")
 const PLAYER := Color("78eef1")
@@ -39,8 +50,10 @@ func _draw() -> void:
 
 	_draw_grid(bounds, area)
 	_draw_markers(bounds, area, chapter_id, state)
-	_print("TAB CLOSE   •   CYAN YOU   •   GOLD OBJECTIVE   •   VIOLET PORTAL / WARD   •   TEAL FONT   •   ROSE NPC   •   RED BOSS",
-		Vector2(26, size.y - 22), size.x - 52, 14, Color("c2beb3"))
+	_print("TAB CLOSE   •   CYAN ARROW YOU   •   GOLD RING OBJECTIVE   •   GOLD ARCH / SHAFT EXIT (DIM = LOCKED)   •   VIOLET WARD",
+		Vector2(26, size.y - 34), size.x - 52, 13, Color("c2beb3"))
+	_print("TEAL FONT   •   CYAN SERAPHINA   •   AMBER TORIN   •   BRONZE MALCOR   •   ROSE OTHER NPC   •   RED BOSS",
+		Vector2(26, size.y - 16), size.x - 52, 13, Color("c2beb3"))
 
 func _chapter_id() -> String:
 	var current: Variant = game.get("chapter_id")
@@ -113,10 +126,9 @@ func _draw_grid(bounds: Rect2, area: Rect2) -> void:
 	draw_rect(area, Color("667875"), false, 2)
 
 func _draw_markers(bounds: Rect2, area: Rect2, chapter_id: String, state: Dictionary) -> void:
-	for entry: Variant in _entries(game.get("portal_nodes")):
-		if entry is Dictionary and not entry.get("active", true):
-			continue
-		_mark(_position(entry), bounds, area, PORTAL, "portal")
+	for entry: Variant in _exits():
+		if entry is Dictionary:
+			_mark_exit(_position(entry), bounds, area, str(entry.get("kind", "arch")), _truthy(entry.get("active", true)), str(entry.get("label", "")))
 	var ward_entries := _entries(game.get("wards"))
 	for entry: Variant in ward_entries:
 		_mark(_position(entry), bounds, area, WARD, "ward")
@@ -132,16 +144,20 @@ func _draw_markers(bounds: Rect2, area: Rect2, chapter_id: String, state: Dictio
 		npcs = game.get("npcs")
 	for entry: Variant in _entries(npcs):
 		var label := str(entry.get("label", entry.get("name", entry.get("speaker", "")))) if entry is Dictionary else ""
-		_mark(_position(entry), bounds, area, NPC, "npc", label)
+		if entry is Dictionary and _truthy(entry.get("departed", false)):
+			continue
+		_mark(_position(entry), bounds, area, _npc_tint(entry, label), "npc", label)
 	if npcs == null:
 		var level_root: Node3D = game.get("level_root") as Node3D
 		if is_instance_valid(level_root):
 			for node: Node in level_root.get_children():
 				var name_lower := String(node.name).to_lower()
 				if name_lower.begins_with("memory_echo_echo_seraphina"):
-					_mark(_position(node), bounds, area, NPC, "npc", "Seraphina")
+					_mark(_position(node), bounds, area, SERAPHINA, "npc", "Seraphina")
 				elif name_lower.begins_with("memory_echo_echo_malcor"):
-					_mark(_position(node), bounds, area, NPC, "npc", "Malcor")
+					_mark(_position(node), bounds, area, MALCOR, "npc", "Malcor")
+				elif name_lower.begins_with("memory_echo_echo_torin"):
+					_mark(_position(node), bounds, area, TORIN, "npc", "Torin")
 
 	var objective: Variant = game.get("objective_target")
 	if game.has_method("get_objective_target"):
@@ -200,10 +216,45 @@ func _legacy_objective(chapter_id: String, state: Dictionary, wards: Array, boss
 	return null
 
 func _portal_to(destination: String, legacy_destination: String) -> Variant:
-	for entry: Variant in _entries(game.get("portal_nodes")):
-		if entry is Dictionary and entry.get("destination") in [destination, legacy_destination]:
+	for entry: Variant in _exits():
+		if entry is Dictionary and entry.get("destination") in [destination, legacy_destination] and _truthy(entry.get("active", true)):
 			return entry
 	return null
+
+# Live physical routes from StoryDirector.get_exits() ({id, label, kind,
+# destination, position, active}), else the legacy portal list.
+func _exits() -> Array:
+	var director: Variant = game.get("story_director")
+	if is_instance_valid(director) and director.has_method("get_exits"):
+		var exits: Variant = director.call("get_exits")
+		if exits is Array:
+			return exits
+	var fallback: Array = []
+	for entry: Variant in _entries(game.get("portal_nodes")):
+		if entry is Dictionary:
+			var exit: Dictionary = entry.duplicate()
+			exit["kind"] = entry.get("kind", "arch")
+			exit["active"] = entry.get("active", true)
+			fallback.append(exit)
+	return fallback
+
+func _truthy(value: Variant) -> bool:
+	if value is bool:
+		return value
+	return (value is int or value is float) and value != 0
+
+func _npc_tint(entry: Variant, label: String) -> Color:
+	var keys := label
+	if entry is Dictionary:
+		keys += " %s %s %s" % [entry.get("id", ""), entry.get("kind", ""), entry.get("speaker", "")]
+	keys = keys.to_lower()
+	if keys.contains("seraphina"):
+		return SERAPHINA
+	if keys.contains("torin"):
+		return TORIN
+	if keys.contains("malcor"):
+		return MALCOR
+	return NPC
 
 func _pickup_of_kind(kind: String) -> Variant:
 	for entry: Variant in _entries(game.get("pickups")):
@@ -221,7 +272,11 @@ func _entries(entries: Variant) -> Array:
 func _position(entry: Variant) -> Variant:
 	var target: Variant = entry
 	if entry is Dictionary:
-		target = entry.get("node", entry.get("position", entry.get("pos")))
+		for key: String in ["node", "marker", "position", "pos"]:
+			var found: Variant = _position(entry.get(key)) if entry.has(key) and not entry.get(key) is Dictionary else null
+			if found != null:
+				return found
+		return null
 	if target is Vector3 and target.is_finite():
 		return target
 	if typeof(target) == TYPE_OBJECT and is_instance_valid(target) and target is Node3D and target.is_inside_tree():
@@ -254,6 +309,34 @@ func _mark(world_pos: Variant, bounds: Rect2, area: Rect2, tint: Color, kind: St
 			draw_circle(point, 5, tint, true, -1.0, true)
 			if not label.is_empty():
 				_print(label, point + Vector2(10, 4), 104, 13, tint)
+
+func _mark_exit(world_pos: Variant, bounds: Rect2, area: Rect2, kind: String, open: bool, label: String) -> void:
+	if not world_pos is Vector3 or not bounds.has_point(Vector2(world_pos.x, world_pos.z)):
+		return
+	var point := _point(world_pos, bounds, area)
+	var rim := EXIT_RIM if open else EXIT_LOCKED.lightened(0.2)
+	var fill := EXIT_OPEN if open else EXIT_LOCKED
+	if kind in ["drop", "shaft", "stair_down"]:
+		var mouth := Rect2(point - Vector2(8, 8), Vector2(16, 16))
+		draw_rect(mouth.grow(1.5), EXIT_OUTLINE)
+		draw_rect(mouth, Color(fill, 0.22 if open else 0.12))
+		draw_rect(mouth, rim, false, 2.0)
+		draw_line(point + Vector2(0, -5), point + Vector2(0, 3), fill, 2.0, true)
+		draw_polyline(PackedVector2Array([point + Vector2(-4.5, -0.5), point + Vector2(0, 4), point + Vector2(4.5, -0.5)]), fill, 2.4, true)
+	else:
+		var outline := PackedVector2Array()
+		for vertex: Vector2 in ARCH_OUTLINE:
+			outline.append(point + vertex)
+		draw_polyline(outline, EXIT_OUTLINE, 5.0, true)
+		draw_polyline(outline, fill, 3.0, true)
+		draw_polyline(outline, rim, 1.0, true)
+		draw_line(point + Vector2(-9, 8), point + Vector2(9, 8), rim, 2.0, true)
+		if open:
+			draw_circle(point + Vector2(0, 2), 2.4, fill)
+	if not open:
+		draw_line(point + Vector2(-6, 0), point + Vector2(6, 0), Color(EXIT_LOCKED, 0.9), 2.0, true)
+	if not label.is_empty():
+		_print(label, point + Vector2(12, 4), 150, 12, fill if open else Color(EXIT_LOCKED, 0.9))
 
 func _diamond(point: Vector2, radius: float, tint: Color) -> void:
 	draw_colored_polygon(PackedVector2Array([

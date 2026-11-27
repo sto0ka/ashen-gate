@@ -8,12 +8,20 @@ const NarrativeSystem = preload("res://scripts/narrative.gd")
 const Audio3D = preload("res://scripts/audio_3d.gd")
 const PhysicsSandbox = preload("res://scripts/physics_sandbox.gd")
 const CombatSystems = preload("res://scripts/combat_systems.gd")
+const EnemyAI = preload("res://scripts/enemy_ai.gd")
+const StoryDirector = preload("res://scripts/story_director.gd")
+const ChapterCourt = preload("res://scripts/chapters/chapter_1_court.gd")
+const ChapterTower = preload("res://scripts/chapters/chapter_2_tower.gd")
 const ChapterRegistry = preload("res://scripts/chapters/chapter_registry.gd")
 const ChapterKiln = preload("res://scripts/chapters/chapter_3_kiln.gd")
 const PauseMenu = preload("res://scripts/ui_menu.gd")
 const SaveSystem = preload("res://scripts/save_system.gd")
 
 const GRAVITY := 18.0
+const HOT_KEY_MESSAGE := "ASHEN KEY STILL TEMPERING — TOO HOT TO HANDLE"
+const AXE_SWING_TIMES := [0.38, 0.38, 0.50]
+const FIRE_PATCH_RADIUS := 2.6
+const FIRE_PATCH_TICK := 0.6
 const LAYER_WORLD := 1
 const LAYER_ENEMY := 2
 const LAYER_PUSHABLE := 4
@@ -32,6 +40,8 @@ var vignette_rect: ColorRect
 
 # Weapon & combat animation state
 var swing_time := 0.0
+var axe_combo_step := 0
+var axe_combo_timer := 0.0
 var swing_contact_done := false
 var arbalest_recoil := 0.0
 var thurible_time := 0.0
@@ -67,6 +77,7 @@ var mana_regen_acc := 0.0
 var flasks := 2
 var mode := 0 # 0=axe, 1=arbalest, 2=thurible, 3=voltaic
 var cooldown := 0.0
+var offhand_cooldown := 0.0
 var flash := 0.0
 var flash_color := Color(0.75, 0.1, 0.05)
 var message_time := 0.0
@@ -94,12 +105,14 @@ var fonts: Array[Node3D] = []
 var portal_nodes: Array[Dictionary] = []
 var inscriptions: Array[Dictionary] = []
 var breakables: Array[RigidBody3D] = []
-var wards: Array[StaticBody3D] = []
+# Voltaic raycasts check this list with several collider types.
+var wards: Array[Node3D] = []
 var ward_beams: Array[MeshInstance3D] = []
 var boss: CharacterBody3D
 var bosses: Array[CharacterBody3D] = []
 var boss_phase := 0
 var active_shockwaves: Array[Dictionary] = []
+var active_fire_patches: Array[Dictionary] = []
 var npc_nodes: Array[Dictionary] = []
 var wet_zones: Array[Dictionary] = []
 var voltaic_conduits: Array[Node3D] = []
@@ -140,6 +153,11 @@ var ambush_pending := false
 # Movement, feel & settings
 var hazard_timer := 0.0
 var camera_shake := 0.0
+var story_shake := 0.0
+var unpick_held := false
+var unpick_lock: Node3D
+var unpick_time := 0.0
+var unpick_tumblers := 0
 var jump_buffer := 0.0
 var coyote_time := 0.0
 var footstep_time := 0.0
@@ -163,6 +181,8 @@ var enemy_bolts: Array[Dictionary] = []
 # Subsystems & UI
 var audio_3d: Audio3D
 var narrative: NarrativeSystem
+var story_director: StoryDirector
+var resonance_overlay: ColorRect
 var pause_menu: PauseMenu
 var sounds := {} # Kept for legacy test compatibility
 var mats := {}
@@ -194,8 +214,13 @@ func _ready() -> void:
 	_build_player()
 	_build_hud()
 	_setup_audio()
-	_load_chapter("ch1_court", true)
-	Visuals.apply_graphics_settings(world_env, get_viewport(), settings)
+	story_director = StoryDirector.new()
+	add_child(story_director)
+	# Setup connects Narrative's speaker cue to Audio3D for the mounted chapter.
+	story_director.setup(self, null)
+	story_director.set_physics_process(false)
+	_load_chapter("ch1_court")
+	story_flags.append("visited/ch1_court")
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	_story_event(
 		"arrival",
@@ -405,8 +430,14 @@ func _npc(pos: Vector3, npc_kind: String, npc_id: String, speaker: String, lines
 	level_root.add_child(holder)
 	var rig := Meshes3D.build_npc_rig(npc_kind, mats)
 	holder.add_child(rig)
-	var accent := Color("70d7df") if npc_kind == "seraphina" else Color("d99cbd")
-	_light(pos + Vector3(0, 1.8, 0), accent, 1.8, 5.5)
+	var accent := Color("c7986a")
+	match npc_kind:
+		"torin", "bellwatch_guard":
+			accent = Color("ffab48")
+		"seraphina":
+			accent = Color("70d7df")
+	if not rig.has_meta("lantern_light") and not rig.has_meta("handbell_light"):
+		_light(pos + Vector3(0, 1.8, 0), accent, 1.8, 5.5).reparent(holder)
 	npc_nodes.append({
 		"node": holder, "rig": rig, "kind": npc_kind, "id": npc_id,
 		"speaker": speaker, "lines": lines, "accent": accent, "spoken": false,
@@ -426,7 +457,8 @@ func _ward(pos: Vector3, ward_id: String) -> void:
 func _shatter_ward(ward: StaticBody3D) -> void:
 	if not is_instance_valid(ward) or not wards.has(ward):
 		return
-	_state().wards.append(ward.get_meta("id"))
+	var ward_id: String = ward.get_meta("id")
+	_state().wards.append(ward_id)
 	wards.erase(ward)
 	ward.collision_layer = 0
 	_sound_at("frost", ward.global_position)
@@ -434,11 +466,38 @@ func _shatter_ward(ward: StaticBody3D) -> void:
 	var tween := create_tween().bind_node(ward)
 	tween.tween_property(ward, "position:y", ward.position.y - 2.0, 0.28)
 	tween.tween_callback(ward.queue_free)
+	story_director.snap_ward_chain(ward_id)
+	story_director.start_sequence("ch2_tower/" + ward_id + "_broken")
+	_update_belfry_seal(ward_id)
+	if is_instance_valid(boss) and boss.get_meta("kind") == "warden":
+		Meshes3D.set_warden_aegis(boss.get_meta("rig"), 1.0, wards.size())
 	_objective()
 	narrative.show_style_banner("WARD SHATTERED (%d LEFT)" % wards.size(), Color("d68ef5"))
-	if wards.is_empty():
-		_sound("bell")
+	if wards.is_empty() and not story_director.has_sequence("ch2_tower/" + ward_id + "_broken"):
 		narrative.say("LORD MALCOR (BELL WARDEN)", "My wards are broken! Ascend to the Belfry Sanctum, Caelen—let us see if your conviction matches your axe!", 5.0, Color("d99cbd"))
+
+func _update_belfry_seal(ward_id: String) -> void:
+	var seal := level_root.get_meta("belfry_ward_seal", null) as StaticBody3D if level_root.has_meta("belfry_ward_seal") else null
+	if not is_instance_valid(seal):
+		return
+	var sigils: Dictionary = seal.get_meta("sigil_nodes")
+	var sigil: Node3D = sigils.get(ward_id)
+	if is_instance_valid(sigil):
+		sigils.erase(ward_id)
+		sigil.hide()
+		sigil.queue_free()
+	if wards.is_empty():
+		seal.collision_layer = 0
+		var pos := seal.global_position
+		var color := Color("c994ff")
+		_sound_at("bell", pos, 0.66)
+		_spell_impact(pos + Vector3.UP * 2.4, color, Vector3.UP)
+		_shockwave(pos + Vector3.UP * 0.12, color, 8.0)
+		var tween := seal.create_tween().set_parallel()
+		tween.tween_property(seal, "scale:y", 0.025, 0.4).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+		tween.tween_property(seal.get_child(0), "transparency", 1.0, 0.4)
+		tween.chain().tween_callback(level_root.remove_meta.bind("belfry_ward_seal"))
+		tween.tween_callback(seal.queue_free)
 
 func _rune_circle(center: Vector3, radius: float) -> void:
 	for i in 24:
@@ -469,10 +528,10 @@ func _stained_glass(pos: Vector3, left: bool) -> void:
 	window.shaded = false
 	level_root.add_child(window)
 
-func _inscription(pos: Vector3, title: String, writing: String) -> void:
+func _inscription(pos: Vector3, title: String, writing: String, parent: Node3D = null) -> void:
 	var holder := Node3D.new()
 	holder.position = pos
-	level_root.add_child(holder)
+	(parent if parent != null else level_root).add_child(holder)
 	LevelBuilder.box(holder, "inscribed_stone", Vector3(0, 0.75, 0), Vector3(0.85, 1.5, 0.32), mats.dark, false)
 	LevelBuilder.box(holder, "glowing_rune", Vector3(0, 1.0, -0.2), Vector3(0.32, 0.35, 0.04), mats.mana, false)
 	inscriptions.append({"node": holder, "title": title, "writing": writing})
@@ -581,7 +640,8 @@ func _detonate_cask(pos: Vector3) -> void:
 		if is_instance_valid(e) and e.global_position.distance_to(pos) < 5.8:
 			var elem: ElementalComponent = e.get_meta("elemental")
 			var res := elem.apply_burn(5.0)
-			_damage_enemy(e, int(115.0 * damage_mult))
+			CombatSystems.damage_executioner_shield(self, e, CombatSystems.SHIELD_HP)
+			_apply_warden_hit(e, int(115.0 * damage_mult), 150.0, "ALCHEMICAL BLAST!")
 			if res.thermal_shock and is_instance_valid(e) and enemies.has(e):
 				_trigger_thermal_shock(e)
 	for other in breakables.duplicate():
@@ -721,6 +781,11 @@ func _enemy(pos: Vector3, armored: bool, enemy_id: String, is_boss: bool = false
 	e.set_meta("attack", rng.randf_range(0.5, 1.4))
 	e.set_meta("armored", armored or kind == "executioner" or kind == "ash_sentinel" or kind == "colossus")
 	e.set_meta("has_shield", kind == "executioner")
+	if kind == "executioner":
+		e.set_meta("shield_hp", CombatSystems.SHIELD_HP)
+	elif kind == "warden":
+		e.set_meta("aegis_hp", CombatSystems.AEGIS_HP)
+		e.set_meta("aegis_max_hp", CombatSystems.AEGIS_HP)
 	e.set_meta("boss", is_boss)
 	e.set_meta("kind", kind)
 	e.set_meta("windup", 0.0)
@@ -748,6 +813,8 @@ func _enemy(pos: Vector3, armored: bool, enemy_id: String, is_boss: bool = false
 	var rig := Meshes3D.build_enemy_rig(kind, mats)
 	e.add_child(rig)
 	e.set_meta("rig", rig)
+	if kind == "warden":
+		Meshes3D.set_warden_aegis(rig, 1.0, wards.size())
 	var warning := LevelBuilder.cylinder(e, "attack_warning", Vector3(0, 0.06, 0), 2.1 if is_boss else 1.15 if kind == "acolyte" else 0.95, 0.04, mats.warning, false, 24)
 	warning.visible = false
 	e.set_meta("warning", warning)
@@ -822,6 +889,7 @@ func _build_hud() -> void:
 	var hud := Control.new()
 	hud.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	layer.add_child(hud)
+	resonance_overlay = Visuals.create_resonance_overlay(hud)
 	var top := ColorRect.new()
 	top.color = Color(0.015, 0.025, 0.028, 0.80)
 	top.anchor_right = 1
@@ -833,11 +901,14 @@ func _build_hud() -> void:
 	labels.goal = _hud_label(hud, "OBJECTIVE: MEET SERAPHINA", Vector2(760, 10), Vector2(500, 30), 16, Color("c98d60"))
 	labels.goal.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 
-	labels.boss = _hud_label(hud, "", Vector2(360, 50), Vector2(560, 30), 19, Color("e6b0d6"))
+	labels.ward_status = _hud_label(hud, "", Vector2(290, 44), Vector2(700, 23), 13, Color("e0ccf5"))
+	labels.ward_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	labels.ward_status.hide()
+	labels.boss = _hud_label(hud, "", Vector2(360, 67), Vector2(560, 30), 19, Color("e6b0d6"))
 	labels.boss.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	var boss_bg := ColorRect.new()
 	boss_bg.color = Color(0.05, 0.04, 0.07, 0.85)
-	boss_bg.position = Vector2(430, 82)
+	boss_bg.position = Vector2(430, 97)
 	boss_bg.size = Vector2(420, 10)
 	boss_bg.visible = false
 	hud.add_child(boss_bg)
@@ -852,6 +923,21 @@ func _build_hud() -> void:
 	boss_bg.add_child(boss_notch)
 	hud_bars.boss_bg = boss_bg
 	hud_bars.boss_fill = boss_fill
+
+	var aegis_bg := ColorRect.new()
+	aegis_bg.color = Color(0.08, 0.05, 0.14, 0.9)
+	aegis_bg.position = Vector2(430, 111)
+	aegis_bg.size = Vector2(420, 6)
+	aegis_bg.hide()
+	hud.add_child(aegis_bg)
+	var aegis_fill := ColorRect.new()
+	aegis_fill.color = Color("74d8ff")
+	aegis_fill.size = Vector2(420, 6)
+	aegis_bg.add_child(aegis_fill)
+	hud_bars.aegis_bg = aegis_bg
+	hud_bars.aegis_fill = aegis_fill
+	labels.aegis = _hud_label(aegis_bg, "", Vector2(-70, 7), Vector2(560, 22), 13, Color.WHITE)
+	labels.aegis.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 
 	var bottom := ColorRect.new()
 	bottom.color = Color(0.015, 0.022, 0.028, 0.88)
@@ -891,11 +977,13 @@ func _build_hud() -> void:
 	labels.weapon.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	labels.prompt = _hud_label(hud, "", Vector2(290, 492), Vector2(700, 42), 20, Color("f0d297"))
 	labels.prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	labels.message = _hud_label(hud, "", Vector2(185, 96), Vector2(910, 80), 21, Color("e4c5a2"))
+	labels.message = _hud_label(hud, "", Vector2(185, 143), Vector2(910, 80), 21, Color("e4c5a2"))
 	labels.message.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	labels.message.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	var crosshair := _hud_label(hud, "+", Vector2(621, 330), Vector2(40, 40), 25, Color("c8d6d3"))
-	crosshair.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	labels.crosshair = _hud_label(hud, "+", Vector2(621, 330), Vector2(40, 40), 25, Color("c8d6d3"))
+	labels.crosshair.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	labels.reticle_hint = _hud_label(hud, "", Vector2(340, 368), Vector2(600, 28), 13, Color("d9e3df"))
+	labels.reticle_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	labels.hitmarker = _hud_label(hud, "X", Vector2(611, 320), Vector2(60, 60), 34, Color("ffaf7b"))
 	labels.hitmarker.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	labels.hitmarker.visible = false
@@ -950,6 +1038,15 @@ func _build_hud() -> void:
 	pause_menu.handle_escape = false
 	hud.add_child(pause_menu)
 	pause_menu.setup(title_font, settings)
+	pause_menu.visibility_changed.connect(func() -> void:
+		# The pause menu still receives Escape while the gameplay tree is paused.
+		pause_menu.handle_escape = pause_menu.visible
+		var travelling := is_instance_valid(story_director) and story_director.is_transitioning()
+		narrative.set_gameplay_hud_visible(not pause_menu.visible and not travelling)
+		if pause_menu.visible:
+			unpick_held = false
+			_step_unpick(0.0)
+	)
 	pause_menu.resume_requested.connect(func() -> void: Input.mouse_mode = Input.MOUSE_MODE_CAPTURED)
 	pause_menu.load_checkpoint_requested.connect(func() -> void:
 		pause_menu.close_menu()
@@ -1011,8 +1108,6 @@ func _on_trigger_entered(trigger_id: String, objective_text: String, journal_id:
 		for npc in npc_nodes:
 			if npc.id == "seraphina_gatehouse" and not npc.spoken:
 				_trigger_npc_dialogue(npc)
-	elif trigger_id == "belfry_sanctum":
-		narrative.show_style_banner("LORD MALCOR AWAKENS", Color("d99cbd"))
 
 func _on_checkpoint_reached(checkpoint_id: String, zone_label: String) -> void:
 	if _state().get("checkpoint_id", "") == checkpoint_id:
@@ -1057,7 +1152,7 @@ func _activate_voltaic_conduit(target: Node3D) -> void:
 		_message("AQUEDUCT PUMP POWERED — FREEZE THE FALLS & TURN THE VALVE!", 3.2)
 
 func _toggle_grasp() -> void:
-	if hp <= 0 or won:
+	if hp <= 0:
 		return
 	if is_instance_valid(held_body):
 		held_body.gravity_scale = 1.0
@@ -1065,27 +1160,22 @@ func _toggle_grasp() -> void:
 		_sound("repulse", 1.4)
 		_message("OBJECT RELEASED", 0.9)
 		return
-	var from := camera.global_position
-	var to := from + -camera.global_transform.basis.z * 8.0
-	var q := PhysicsRayQueryParameters3D.create(from, to, LAYER_PUSHABLE | LAYER_ENEMY)
-	q.exclude = [player.get_rid()]
-	var hit := get_world_3d().direct_space_state.intersect_ray(q)
-	if not hit.is_empty():
-		if hit.collider is CharacterBody3D and enemies.has(hit.collider):
-			var yanked := CombatSystems.try_yank_shield(self, hit.collider)
-			if yanked != null:
-				held_body = yanked
-				held_body.gravity_scale = 0.0
-				_sound("repulse", 1.55)
-				narrative.show_style_banner("SHIELD RIPPED! LMB TO HURL!", Color("70d7df"))
-				return
-		elif hit.collider is RigidBody3D and not hit.collider.freeze and not hit.collider.get_meta("ore_cart", false) and not hit.collider.get_meta("pendulum", false):
-			held_body = hit.collider
+	var target := CombatSystems.find_grasp_target(self, camera.global_position, -camera.global_transform.basis.z, 11.0)
+	if target is CharacterBody3D:
+		var yanked := CombatSystems.try_yank_shield(self, target)
+		if yanked != null:
+			held_body = yanked
 			held_body.gravity_scale = 0.0
-			held_body.linear_velocity = Vector3.ZERO
-			_sound("repulse", 1.6)
-			_message("TELEKINETIC GRASP  •  LMB TO HURL  •  G TO DROP", 1.8)
+			_sound("repulse", 1.55)
+			narrative.show_style_banner("SHIELD RIPPED! LMB TO HURL!", Color("70d7df"))
 			return
+	elif target is RigidBody3D:
+		held_body = target
+		held_body.gravity_scale = 0.0
+		held_body.linear_velocity = Vector3.ZERO
+		_sound("repulse", 1.6)
+		_message("TELEKINETIC GRASP  •  LMB TO HURL  •  G TO DROP", 1.8)
+		return
 	_message("AIM AT AN URN, CASK, BLOCK, OR SHIELDED EXECUTIONER", 1.2)
 
 func _hurl_held() -> void:
@@ -1105,7 +1195,7 @@ func _hurl_held() -> void:
 	_message("TELEKINETIC HURL!", 1.0)
 
 func _dash() -> void:
-	if dash_cooldown > 0.0 or hp <= 0 or won:
+	if dash_cooldown > 0.0 or hp <= 0:
 		return
 	var move := Vector2.ZERO
 	if Input.is_key_pressed(KEY_A): move.x -= 1
@@ -1125,7 +1215,7 @@ func _dash() -> void:
 	_sound("jump", 1.45)
 
 func _start_parry() -> void:
-	if parry_cooldown > 0.0 or hp <= 0 or won:
+	if parry_cooldown > 0.0 or hp <= 0:
 		return
 	parry_active_timer = 0.28
 	parry_cooldown = 0.72
@@ -1136,17 +1226,7 @@ func get_objective_target() -> Variant:
 	var st := _state()
 	match chapter_id:
 		"ch1_court":
-			if not st.get("gatehouse_open", false):
-				return Vector3(-5.5, 0, 32)
-			if gate_open:
-				return Vector3(0, 0, -31.8)
-			if not has_arbalest:
-				return Vector3(-17.8, 0, -1.2)
-			if not st.get("has_lever", false):
-				return Vector3(22, 0, -13.1)
-			if not st.get("lever_inserted", false):
-				return Vector3(-5.8, 0, -16.9)
-			return Vector3(0, 0, -5.0)
+			return ChapterCourt.objective_target(st)
 		"ch2_tower":
 			if st.get("boss_dead", false):
 				return Vector3(0, 7.0, -42.0)
@@ -1155,7 +1235,7 @@ func get_objective_target() -> Variant:
 			return Vector3(0, 9.5, -42.0)
 		"ch3_kiln":
 			if st.get("great_gate_open", false):
-				return null
+				return null if st.get("act_complete", false) else ChapterKiln.MARKS.S5_edge.pos
 			if has_ashen_key:
 				return boss.global_position if is_instance_valid(boss) else Vector3(0, 0, -38.0)
 			if not st.get("aqueduct_powered", false):
@@ -1205,6 +1285,9 @@ func _refresh_hud_numbers() -> void:
 	labels.weapon.text = "CLEAVER-AXE" if mode == 0 else "BRIAR ARBALEST" if mode == 1 else "CINDER THURIBLE" if mode == 2 else "VOLTAIC FORK"
 
 func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.keycode == KEY_E and not event.pressed:
+		unpick_held = false
+		_step_unpick(0.0)
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
 		if map_overlay.visible or journal_panel.visible:
 			map_overlay.visible = false
@@ -1220,7 +1303,7 @@ func _input(event: InputEvent) -> void:
 		return
 	if event is InputEventKey and event.keycode == KEY_SPACE and not event.pressed and player.velocity.y > 0:
 		player.velocity.y *= 0.55
-	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not map_overlay.visible and not journal_panel.visible and not won and hp > 0:
+	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and not map_overlay.visible and not journal_panel.visible and hp > 0:
 		var sens: float = float(settings.get("mouse_sens", 1.0))
 		player.rotation.y -= event.relative.x * 0.0022 * sens
 		pitch = clampf(pitch - event.relative.y * 0.0022 * sens, -1.42, 1.42)
@@ -1301,7 +1384,9 @@ func _input(event: InputEvent) -> void:
 			KEY_F:
 				_heal()
 			KEY_E:
-				_use()
+				if not map_overlay.visible and not journal_panel.visible and hp > 0:
+					unpick_held = true
+					_use()
 			KEY_R:
 				if won:
 					get_tree().reload_current_scene()
@@ -1314,17 +1399,25 @@ func _input(event: InputEvent) -> void:
 		if event.button_index == MOUSE_BUTTON_LEFT:
 			if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 				Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-			elif not won and hp > 0 and not map_overlay.visible and not journal_panel.visible:
+			elif hp > 0 and not map_overlay.visible and not journal_panel.visible:
 				if is_instance_valid(held_body):
 					_hurl_held()
 				else:
 					_attack()
-		elif event.button_index == MOUSE_BUTTON_RIGHT and not won and hp > 0 and not map_overlay.visible and not journal_panel.visible:
+		elif event.button_index == MOUSE_BUTTON_RIGHT and hp > 0 and not map_overlay.visible and not journal_panel.visible:
 			_frost_cast()
-		elif event.button_index == MOUSE_BUTTON_MIDDLE and not won and hp > 0 and not map_overlay.visible and not journal_panel.visible:
+		elif event.button_index == MOUSE_BUTTON_MIDDLE and hp > 0 and not map_overlay.visible and not journal_panel.visible:
 			_start_parry()
 
 func _physics_process(delta: float) -> void:
+	var hud_visible := not (pause_menu.visible or map_overlay.visible or journal_panel.visible)
+	narrative.set_gameplay_hud_visible(hud_visible and not story_director.is_transitioning())
+	if hud_visible and hp > 0:
+		story_director.step_physics(delta)
+		_step_unpick(delta)
+	else:
+		unpick_held = false
+		_step_unpick(0.0)
 	if hitstop_time > 0.0:
 		hitstop_time = maxf(0.0, hitstop_time - delta)
 		return
@@ -1334,6 +1427,8 @@ func _physics_process(delta: float) -> void:
 	if is_instance_valid(audio_3d):
 		audio_3d.tick(delta)
 	cooldown = maxf(0.0, cooldown - delta)
+	offhand_cooldown = maxf(0.0, offhand_cooldown - delta)
+	axe_combo_timer = maxf(0.0, axe_combo_timer - delta)
 	dash_cooldown = maxf(0.0, dash_cooldown - delta)
 	dash_time = maxf(0.0, dash_time - delta)
 	hurt_cooldown = maxf(0.0, hurt_cooldown - delta)
@@ -1348,7 +1443,7 @@ func _physics_process(delta: float) -> void:
 
 	PhysicsSandbox.tick_noises(noise_events, delta)
 
-	if mana_regen_rate > 0.0 and hp > 0 and not won:
+	if mana_regen_rate > 0.0 and hp > 0:
 		mana_regen_acc += mana_regen_rate * delta
 		if mana_regen_acc >= 1.0:
 			var add_m := int(mana_regen_acc)
@@ -1391,7 +1486,9 @@ func _physics_process(delta: float) -> void:
 		vignette_rect.color.a = move_toward(vignette_rect.color.a, 0.0, delta * 0.8)
 
 	camera_shake = maxf(0.0, camera_shake - delta * 0.95)
-	camera.position = Vector3(rng.randf_range(-1, 1), rng.randf_range(-1, 1), 0) * camera_shake
+	story_shake = maxf(0.0, story_shake - delta * 0.95)
+	var shake_direction := Vector3(rng.randf_range(-1, 1), rng.randf_range(-1, 1), 0).limit_length()
+	camera.position = shake_direction * (camera_shake + story_shake)
 	view_kick = move_toward(view_kick, 0.0, delta * 1.9)
 	camera.rotation.x = lerpf(camera.rotation.x, view_kick, minf(1.0, delta * 14.0))
 
@@ -1400,7 +1497,7 @@ func _physics_process(delta: float) -> void:
 		if message_time <= 0.0:
 			labels.message.text = ""
 
-	if won or hp <= 0 or map_overlay.visible or journal_panel.visible:
+	if hp <= 0 or not hud_visible:
 		return
 
 	if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED and Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT) and cooldown <= 0.0 and not is_instance_valid(held_body):
@@ -1473,12 +1570,14 @@ func _physics_process(delta: float) -> void:
 	_animate_weapon_3d(delta, move, sprinting)
 	_update_enemies(delta)
 	_update_bolts(delta)
+	_update_fire_patches(delta)
 	_update_enemy_bolts(delta)
 	_update_shockwaves(delta)
 	_update_pickups(delta)
 	_update_breakables()
 	_update_puzzles(delta)
 	_update_prompt()
+	_update_reticle_hint()
 	_update_compass()
 
 	# Adaptive combat audio crossfade
@@ -1495,18 +1594,22 @@ func _physics_process(delta: float) -> void:
 		hud_bars.hp.size.x = lerpf(hud_bars.hp.size.x, 160.0 * clampf(float(hp) / float(max_hp), 0.0, 1.0), minf(1.0, delta * 12.0))
 		hud_bars.mana.size.x = lerpf(hud_bars.mana.size.x, 150.0 * clampf(float(mana) / float(max_mana), 0.0, 1.0), minf(1.0, delta * 12.0))
 		hud_bars.green.size.x = lerpf(hud_bars.green.size.x, 150.0 * clampf(float(green_mana) / float(max_mana), 0.0, 1.0), minf(1.0, delta * 12.0))
-		var show_boss := is_instance_valid(boss) and enemies.has(boss)
+		var show_boss := _should_show_boss_hud()
 		hud_bars.boss_bg.visible = show_boss
+		labels.boss.visible = show_boss
 		if show_boss:
+			var bname := _boss_display_name()
+			labels.boss.text = "%s   %d / %d" % [bname, maxi(0, int(boss.get_meta("hp"))), int(boss.get_meta("max_hp"))]
 			var bmax := float(boss.get_meta("max_hp", 520))
 			hud_bars.boss_fill.size.x = lerpf(hud_bars.boss_fill.size.x, 420.0 * clampf(float(boss.get_meta("hp")) / bmax, 0.0, 1.0), minf(1.0, delta * 10.0))
+		_refresh_aegis_hud()
 
 	for i in torches.size():
 		if is_instance_valid(torches[i]):
 			if ambush_dark_timer > 0.0 and crypt_torches.has(torches[i]):
-				torches[i].light_energy = 0.05
+				torches[i].light_energy = 0.05 * StoryDirector.get_torch_scale(torches[i])
 			else:
-				torches[i].light_energy = 2.9 + sin(elapsed * 9.0 + i * 2.3) * 0.4
+				torches[i].light_energy = (2.9 + sin(elapsed * 9.0 + i * 2.3) * 0.4) * StoryDirector.get_torch_scale(torches[i])
 
 func _animate_weapon_3d(delta: float, move: Vector2, sprinting: bool) -> void:
 	if not is_instance_valid(weapon_holder):
@@ -1521,27 +1624,45 @@ func _animate_weapon_3d(delta: float, move: Vector2, sprinting: bool) -> void:
 	pos.y += sin(elapsed * 12.0) * 0.014 * move.length() * bob_scale + weapon_sway.y - equip_offset - heal_anim_time * 0.25
 	rot.z += -move.x * 0.055
 
-	if parry_active_timer > 0.0:
-		pos += Vector3(-0.22, 0.14, 0.08)
-		rot += Vector3(0.25, 0.95, 0.85)
-	elif swing_time > 0.0:
+	if swing_time > 0.0:
 		swing_time = maxf(0.0, swing_time - delta)
-		var age := 0.44 - swing_time
-		if not swing_contact_done and age >= 0.18:
+		var duration: float = AXE_SWING_TIMES[axe_combo_step]
+		var progress := 1.0 - swing_time / duration
+		var windup_pos := Vector3(0.16, 0.14, 0.08)
+		var windup_rot := Vector3(0.35, -0.45, -0.35)
+		var follow_pos := Vector3(-0.48, -0.10, -0.18)
+		var follow_rot := Vector3(-0.75, 1.05, 0.95)
+		var windup_end := 0.25
+		match axe_combo_step:
+			1:
+				windup_pos = Vector3(-0.42, -0.06, 0.08)
+				windup_rot = Vector3(-0.28, 0.95, 0.78)
+				follow_pos = Vector3(0.34, 0.16, -0.18)
+				follow_rot = Vector3(0.44, -0.98, -0.66)
+			2:
+				windup_pos = Vector3(-0.22, 0.48, 0.18)
+				windup_rot = Vector3(1.25, 0.16, 0.30)
+				follow_pos = Vector3(-0.21, -0.31, -0.36)
+				follow_rot = Vector3(-1.25, 0.06, 0.12)
+				windup_end = 0.42
+		if not swing_contact_done and progress >= lerpf(windup_end, 0.66, 0.48):
 			swing_contact_done = true
 			_axe_contact()
-		if age < 0.10:
-			var t := age / 0.10
-			pos = pos.lerp(pos + Vector3(0.16, 0.14, 0.08), t)
-			rot = rot.lerp(rot + Vector3(0.35, -0.45, -0.35), t)
-		elif age < 0.27:
-			var t := (age - 0.10) / 0.17
-			pos = (pos + Vector3(0.16, 0.14, 0.08)).lerp(pos + Vector3(-0.48, -0.10, -0.18), t)
-			rot = (rot + Vector3(0.35, -0.45, -0.35)).lerp(rot + Vector3(-0.75, 1.05, 0.95), t)
+		if progress < windup_end:
+			var t := smoothstep(0.0, windup_end, progress)
+			pos += windup_pos * t
+			rot += windup_rot * t
+		elif progress < 0.66:
+			var t := smoothstep(windup_end, 0.66, progress)
+			pos += windup_pos.lerp(follow_pos, t)
+			rot += windup_rot.lerp(follow_rot, t)
 		else:
-			var t := minf(1.0, (age - 0.27) / 0.17)
-			pos = (pos + Vector3(-0.48, -0.10, -0.18)).lerp(pos, t)
-			rot = (rot + Vector3(-0.75, 1.05, 0.95)).lerp(rot, t)
+			var recovery := 1.0 - smoothstep(0.66, 1.0, progress)
+			pos += follow_pos * recovery
+			rot += follow_rot * recovery
+	elif parry_active_timer > 0.0:
+		pos += Vector3(-0.22, 0.14, 0.08)
+		rot += Vector3(0.25, 0.95, 0.85)
 	elif thurible_time > 0.0:
 		thurible_time = maxf(0.0, thurible_time - delta)
 		var age := 0.72 - thurible_time
@@ -1588,14 +1709,15 @@ func _update_puzzles(delta: float) -> void:
 
 	# --- CHAPTER I: Ambush + Buoyant Cistern Lock + Counterweight Portcullis ---
 	if chapter_id == "ch1_court":
+		var was_open := gate_open
 		if ambush_dark_timer > 0.0:
 			ambush_dark_timer = maxf(0.0, ambush_dark_timer - delta)
 			if ambush_dark_timer <= 0.0 and ambush_pending:
 				ambush_pending = false
 				_sound("bell")
-				_enemy(Vector3(24.0, -0.6, -5.0), true, "court_ambush_exec", false, "executioner")
-				_enemy(Vector3(19.5, -0.6, -9.0), false, "court_ambush_shr1", false, "shrieker")
-				_enemy(Vector3(25.5, -0.6, -15.0), false, "court_ambush_shr2", false, "shrieker")
+				_enemy(Vector3(24.0, -0.7, -5.0), true, "court_ambush_exec", false, "executioner")
+				_enemy(Vector3(19.5, -0.7, -9.0), false, "court_ambush_shr1", false, "shrieker")
+				_enemy(Vector3(25.5, -0.7, -15.0), false, "court_ambush_shr2", false, "shrieker")
 				narrative.show_style_banner("OSSUARY AMBUSH!", Color("ff7844"))
 
 		if is_instance_valid(cistern_water_node):
@@ -1615,34 +1737,33 @@ func _update_puzzles(delta: float) -> void:
 						if absf(d.x) < ch.size.x * 0.5 and absf(d.z) < ch.size.z * 0.5:
 							blk.apply_central_force(ch.push_dir * 42.0)
 
-		var pressed_count := 0
 		for plate in pressure_plates:
 			var is_held := false
 			for blk in pushable_blocks:
-				if is_instance_valid(blk):
-					if Vector2(blk.global_position.x - plate.pos.x, blk.global_position.z - plate.pos.z).length() < 1.65:
-						is_held = true
-						break
+				if not is_instance_valid(blk) or not blk.get_meta("pushable_block", false) or blk == held_body:
+					continue
+				var offset: Vector3 = plate.pos - blk.global_position
+				if absf(offset.y) > 1.25:
+					continue
+				offset.y = 0.0
+				if offset.length_squared() >= 1.65 * 1.65:
+					continue
+				# Keep centering after first contact, until the block settles on the plate.
+				if blk.linear_velocity.length_squared() < 3.5 * 3.5 and offset.length_squared() > 0.025:
+					var settled_velocity := (offset * 1.8).limit_length(1.25)
+					settled_velocity.y = blk.linear_velocity.y
+					blk.linear_velocity = blk.linear_velocity.lerp(settled_velocity, minf(1.0, delta * 9.0))
+					blk.angular_velocity *= exp(-delta * 6.0)
+				is_held = true
+				break
 			plate.pressed = is_held
 			if is_instance_valid(plate.node):
 				plate.node.position.y = 0.02 if is_held else 0.08
 				plate.node.get_child(0).material_override = mats.mana if is_held else mats.brass
-			if is_held:
-				pressed_count += 1
 
-		if not gate_open and st.get("lever_inserted", false) and pressed_count >= 2:
-			gate_open = true
-			st.gate_open = true
-			_sound("lever")
-			_sound("bell")
+		ChapterCourt.step(self, delta)
+		if gate_open and not was_open:
 			_objective()
-			narrative.show_style_banner("PORTCULLIS UNLOCKED!", Color("ffd875"))
-
-		if is_instance_valid(gate):
-			var gy := 5.2 if gate_open else 1.9 if st.get("lever_inserted", false) else 0.0
-			gate.position.y = move_toward(gate.position.y, gy, delta * 2.6)
-			if gate_open and gate.position.y >= 4.9:
-				gate.collision_layer = 0
 
 	# --- CHAPTER II: Cogwheel + Moving Lift Set-Piece + PinJoint Pendulum + Ward Beams ---
 	elif chapter_id == "ch2_tower":
@@ -1651,9 +1772,7 @@ func _update_puzzles(delta: float) -> void:
 		if not moving_lift.is_empty():
 			var lift_event := PhysicsSandbox.step_moving_lift(moving_lift, delta, 0.15)
 			if lift_event == "jammed":
-				_sound("hit", 0.7)
-				camera_shake = maxf(camera_shake, 0.22)
-				narrative.show_style_banner("LIFT JAMMED — SHOOT THE GLOWING LATCH!", Color("69dae8"))
+				story_director.start_sequence("ch2_tower/lift_ambush")
 			elif lift_event == "arrived":
 				st.lift_completed = true
 				_sound("lever")
@@ -1685,11 +1804,7 @@ func _update_puzzles(delta: float) -> void:
 				st.dam_broken = true
 				slag_dam.visible = false
 				slag_dam.collision_layer = 0
-				_sound_at("maul", slag_dam.global_position)
-				camera_shake = maxf(camera_shake, 0.28)
-				for i in 8:
-					_debris_piece(slag_dam.global_position + Vector3(rng.randf_range(-1, 1), rng.randf_range(0, 1.5), 0), Vector3(0.28, 0.28, 0.28), mats.cinder, Vector3(rng.randf_range(-3, 3), rng.randf_range(2, 5), rng.randf_range(-5, -1)))
-				narrative.show_style_banner("SLAG DAM SHATTERED!", Color("ff7832"))
+				story_director.start_sequence("ch3_kiln/dam_break")
 				_objective()
 
 		if st.get("gauntlet_triggered", false) and is_instance_valid(rising_slag_node):
@@ -1777,7 +1892,14 @@ func _change_stage(new_stage: int) -> void:
 	if new_stage >= 0 and new_stage < ids.size():
 		_load_chapter(ids[new_stage], true)
 
-func _load_chapter(new_chapter_id: String, reset_spawn: bool = true) -> void:
+func _load_chapter(new_chapter_id: String, reset_spawn: bool = true, show_title_card: bool = true) -> void:
+	story_director.cancel_chapter("unload")
+	narrative.clear_chapter()
+	narrative.chapter_timer = 0.0
+	set_resonance_pulse(0.0)
+	story_shake = 0.0
+	unpick_held = false
+	_step_unpick(0.0)
 	if is_instance_valid(audio_3d):
 		_sound("portal")
 	if is_instance_valid(level_root):
@@ -1798,6 +1920,12 @@ func _load_chapter(new_chapter_id: String, reset_spawn: bool = true) -> void:
 	bolts.clear()
 	enemy_bolts.clear()
 	active_shockwaves.clear()
+	active_fire_patches.clear()
+	swing_time = 0.0
+	axe_combo_timer = 0.0
+	offhand_cooldown = 0.0
+	labels.reticle_hint.text = ""
+	labels.crosshair.modulate = Color.WHITE
 	bosses.clear()
 	boss = null
 	boss_phase = 0
@@ -1848,22 +1976,23 @@ func _load_chapter(new_chapter_id: String, reset_spawn: bool = true) -> void:
 	bell_sequence_step = 0
 	ambush_dark_timer = 0.0
 	ambush_pending = false
-	gate_open = bool(_state().get("gate_open", false))
+	var st := ChapterRegistry.ensure_state_defaults(chapter_id, _state())
+	gate_open = bool(st.get("gate_open", false))
 
 	Visuals.configure_environment(world_env, chapter_id)
-	if is_instance_valid(audio_3d):
-		audio_3d.set_room_acoustics(str(meta.get("acoustics", "cathedral")))
+	Visuals.apply_graphics_settings(world_env, get_viewport(), settings)
+	audio_3d.set_chapter(chapter_id, str(meta.get("acoustics", "cathedral")))
 
+	story_director.begin_chapter(chapter_id, level_root, st)
 	ChapterRegistry.build(self, chapter_id)
+	story_director.finish_chapter_build()
 
 	if reset_spawn:
 		player.position = meta.get("default_spawn", Vector3(0, 0.1, 20))
 		player.rotation.y = 0
 		head.rotation.x = 0
 		pitch = 0
-	player.velocity = Vector3.ZERO
-	jump_buffer = 0.0
-	coyote_time = 0.0
+	_reset_arrival_motion()
 	landing_dip = 0.0
 	view_kick = 0.0
 	camera.rotation.x = 0
@@ -1871,53 +2000,132 @@ func _load_chapter(new_chapter_id: String, reset_spawn: bool = true) -> void:
 	hurt_cooldown = 0.0
 	hitmarker_time = 0.0
 
-	if narrative != null:
+	if show_title_card:
 		narrative.show_chapter(str(meta.get("chapter_num", "")), str(meta.get("title", "")), str(meta.get("subtitle", "")))
 	_objective()
+
+func _reset_arrival_motion() -> void:
+	player.velocity = Vector3.ZERO
+	dash_time = 0.0
+	dash_cooldown = 0.0
+	dash_dir = Vector3.ZERO
+	jump_buffer = 0.0
+	coyote_time = 0.0
+	player.reset_physics_interpolation()
+
+func _mount_chapter_arrival(dest_chapter_id: String, arrival_id: String) -> bool:
+	if not ChapterRegistry.CHAPTERS.has(dest_chapter_id):
+		return false
+	var visited := "visited/" + dest_chapter_id
+	_load_chapter(dest_chapter_id, false, not story_flags.has(visited))
+	var arrival := story_director.get_arrival(arrival_id)
+	player.global_position = arrival.global_position if arrival != null else ChapterRegistry.get_chapter_meta(dest_chapter_id).default_spawn
+	player.rotation.y = arrival.global_rotation.y if arrival != null else 0.0
+	pitch = 0.0
+	head.rotation.x = 0.0
+	_reset_arrival_motion()
+	if not story_flags.has(visited):
+		story_flags.append(visited)
+	# The director writes the same checkpoint on a physical crossing and reports its result.
+	if not story_director.is_transitioning():
+		_write_arrival_checkpoint("arrival/%s/%s" % [dest_chapter_id, arrival_id])
+	_objective()
+	_update_compass()
+	_refresh_hud_numbers()
+	return true
+
+func _write_arrival_checkpoint(checkpoint_id: String) -> bool:
+	_state().checkpoint_id = checkpoint_id
+	return SaveSystem.write_save(self, true)
+
+func add_story_shake(amount: float) -> void:
+	story_shake = maxf(story_shake, clampf(amount, 0.0, StoryDirector.STORY_SHAKE_CAP))
+
+func set_resonance_pulse(value: float, color: Color = Color("b87aff")) -> void:
+	Visuals.set_resonance_pulse(resonance_overlay, value, color)
 
 func _objective() -> void:
 	var meta := ChapterRegistry.get_chapter_meta(chapter_id)
 	var st := _state()
 	labels.area.text = "ASHEN GATE    /    %s" % str(meta.get("title", ""))
 	if chapter_id == "ch1_court":
-		if gate_open:
-			labels.goal.text = "OBJECTIVE: ENTER THE BELL TOWER"
-		elif not st.get("gatehouse_open", false):
-			labels.goal.text = "OBJECTIVE: MEET SERAPHINA AT THE GATEHOUSE"
-		elif st.get("has_lever", false):
-			labels.goal.text = "OBJECTIVE: ALIGN THE COURT SEALS"
-		else:
-			labels.goal.text = "OBJECTIVE: FIND THE ARBALEST & IRON LEVER"
+		labels.goal.text = "OBJECTIVE: " + ChapterCourt.objective_text(st)
 	elif chapter_id == "ch2_tower":
 		if st.get("boss_dead", false):
-			labels.goal.text = "OBJECTIVE: DESCEND TO THE KILN OF ASH"
+			labels.goal.text = "OBJECTIVE: DESCEND TO THE KILN OF ASH" if st.story_world.belfry_shaft_open else "OBJECTIVE: LISTEN TO MALCOR"
 		elif wards.is_empty():
 			labels.goal.text = "OBJECTIVE: DEFEAT LORD MALCOR"
 		else:
 			labels.goal.text = "OBJECTIVE: BREAK THE THREE WARDS (%d LEFT)" % wards.size()
 	else:
-		if st.get("great_gate_open", false):
-			labels.goal.text = "ACT I COMPLETE"
+		if st.get("act_complete", false):
+			labels.goal.text = "ACT I COMPLETE — [ESC] MENU"
+		elif st.get("great_gate_open", false):
+			labels.goal.text = "OBJECTIVE: APPROACH THE HOLLOW BEYOND"
 		elif has_ashen_key and not st.get("colossus_dead", false):
-			labels.goal.text = "OBJECTIVE: DEFEAT THE CRUCIBLE COLOSSUS"
+			labels.goal.text = "OBJECTIVE: DEFEAT " + _boss_display_name()
 		elif has_ashen_key:
 			labels.goal.text = "OBJECTIVE: UNSEAL THE GREAT ASHEN GATE"
 		elif st.get("trough_flooded", false) and st.get("dam_broken", false):
 			labels.goal.text = "OBJECTIVE: TEMPER THE ASHEN KEY"
 		else:
 			labels.goal.text = "OBJECTIVE: FLOOD TROUGH & SMASH SLAG DAM"
-	if is_instance_valid(boss) and enemies.has(boss):
-		var bname := "CRUCIBLE COLOSSUS" if boss.get_meta("kind") == "colossus" else "LORD MALCOR — BELL WARDEN"
+	var show_boss := _should_show_boss_hud()
+	if show_boss:
+		var bname := _boss_display_name()
 		labels.boss.text = "%s   %d / %d" % [bname, maxi(0, int(boss.get_meta("hp"))), int(boss.get_meta("max_hp"))]
 	else:
 		labels.boss.text = ""
+	labels.boss.visible = show_boss
+	labels.ward_status.visible = chapter_id == "ch2_tower" and not st.get("boss_dead", false) and not wards.is_empty()
+	if labels.ward_status.visible:
+		var status := PackedStringArray()
+		for ward_id in LevelBuilder.BELFRY_WARDS:
+			var name: String = LevelBuilder.BELFRY_WARDS[ward_id].label.get_slice(" ·  ", 1)
+			status.append("[%s %s]" % ["✓" if st.wards.has(ward_id) else "●", name])
+		labels.ward_status.text = "WARDS:   " + "   ".join(status)
+	hud_bars.boss_bg.visible = show_boss
+	_refresh_aegis_hud()
+
+func _boss_display_name() -> String:
+	var fallback := ChapterKiln.COLOSSUS_NAME if chapter_id == "ch3_kiln" else "LORD MALCOR — BELL WARDEN"
+	return str(boss.get_meta("display_name", fallback)) if is_instance_valid(boss) else fallback
+
+func _should_show_boss_hud() -> bool:
+	if not is_instance_valid(boss) or not enemies.has(boss):
+		return false
+	if boss.get_meta("kind") == "warden":
+		return wards.is_empty() or (is_instance_valid(player) and player.global_position.z < -27.0)
+	return true
+
+func _refresh_aegis_hud() -> void:
+	var show_aegis: bool = _should_show_boss_hud() and boss.get_meta("kind") == "warden"
+	hud_bars.aegis_bg.visible = show_aegis
+	labels.aegis.visible = show_aegis
+	if not show_aegis:
+		return
+	var ratio := float(boss.get_meta("aegis_hp")) / float(boss.get_meta("aegis_max_hp"))
+	var color := Color("74d8ff")
+	var caption := "RESONANT AEGIS"
+	if not wards.is_empty():
+		ratio = 1.0
+		color = Color("b490ed")
+		caption = "SEALED BY %d TOWER WARDS" % wards.size()
+	elif float(boss.get_meta("aegis_exposed_timer", 0.0)) > 0.0:
+		ratio = 1.0
+		color = Color("ffd875").lerp(Color("b67e39"), (1.0 + sin(elapsed * 10.0)) * 0.5)
+		caption = "AEGIS SHATTERED — EXPOSED (1.75x)!"
+	hud_bars.aegis_fill.size.x = 420.0 * clampf(ratio, 0.0, 1.0)
+	hud_bars.aegis_fill.color = color
+	labels.aegis.modulate = color
+	labels.aegis.text = caption
 
 func _update_prompt() -> void:
 	labels.prompt.text = ""
-	for npc in npc_nodes:
-		if is_instance_valid(npc.node) and player.position.distance_to(npc.node.position + Vector3(0, 1.2, 0)) < 4.0:
-			labels.prompt.text = "[ E ] SPEAK WITH %s" % str(npc.speaker).to_upper()
-			return
+	if unpick_tumblers == 3 or _find_unpick_lock() != null:
+		var tumblers := ["○ ○ ○", "• ○ ○", "• • ○", "• • •"]
+		labels.prompt.text = "[ HOLD E ] UNPICK LOCK  [ %s ]" % tumblers[unpick_tumblers]
+		return
 	for font in fonts:
 		if is_instance_valid(font) and player.position.distance_to(font.position + Vector3(0, 1.0, 0)) < 2.6:
 			labels.prompt.text = "[ E ] REFILL FLASKS & MANA AT ALCHEMICAL FONT"
@@ -1928,10 +2136,10 @@ func _update_prompt() -> void:
 			labels.prompt.text = "[ E ] PULL CISTERN SLUICE LEVER (FLOAT RAFTS)"
 			return
 		if is_instance_valid(switch_node) and not gate_open and player.position.distance_to(switch_node.position + Vector3(0, 1.2, 0)) < 2.8:
-			labels.prompt.text = "[ E ] PULL GATEHOUSE LEVER" if st.get("lever_inserted", false) else "[ E ] INSERT IRON LEVER" if st.get("has_lever", false) else "NEEDS IRON LEVER FROM EAST OSSUARY"
+			labels.prompt.text = str(switch_node.get_meta("interact_hint", ""))
 			return
 		if is_instance_valid(shortcut_door) and not st.get("shortcut_open", false) and player.position.distance_to(shortcut_door.position + Vector3(0, 1.5, 0)) < 2.8:
-			labels.prompt.text = "[ E ] UNBAR SHORTCUT DOOR" if player.position.x > 9.0 else "BARRED FROM THE EAST OSSUARY"
+			labels.prompt.text = "[ E ] UNBAR SHORTCUT DOOR" if player.global_position.x > shortcut_door.global_position.x else "BARRED FROM THE EAST OSSUARY"
 			return
 	elif chapter_id == "ch2_tower":
 		if is_instance_valid(lift_call_lever) and not st.get("lift_completed", false) and player.position.distance_to(lift_call_lever.position + Vector3(0, 1.0, 0)) < 2.8:
@@ -1942,179 +2150,65 @@ func _update_prompt() -> void:
 			labels.prompt.text = "[ E ] TURN AQUEDUCT VALVE" if st.get("aqueduct_powered", false) else "PUMP UNPOWERED — ZAP AQUEDUCT CONDUIT WITH [4]"
 			return
 		if is_instance_valid(hoist_lever) and not st.get("key_forged", false) and player.position.distance_to(hoist_lever.position + Vector3(0, 1.2, 0)) < 2.8:
-			labels.prompt.text = "[ E ] PULL CHAIN HOIST LEVER"
+			labels.prompt.text = str(hoist_lever.get_meta("interact_hint", "[ E ] PULL CHAIN HOIST LEVER"))
 			return
-		if not st.get("great_gate_open", false) and player.position.distance_to(Vector3(0, 1.5, -36.4)) < 4.0:
-			labels.prompt.text = "[ E ] UNSEAL THE GREAT ASHEN GATE" if has_ashen_key else "SEALED — FORGE THE ASHEN KEY"
+		if not st.get("great_gate_open", false) and player.global_position.distance_to(ChapterKiln.GATE_APPROACH) < 4.0:
+			var lock_plate: Node3D = level_root.get_meta("lock_plate_hitbox")
+			labels.prompt.text = str(lock_plate.get_meta("interact_hint"))
 			return
 	for inscription in inscriptions:
-		if is_instance_valid(inscription.node) and player.position.distance_to(inscription.node.position + Vector3(0, 1, 0)) < 2.4:
-			labels.prompt.text = "[ E ] READ %s" % inscription.title
+		if is_instance_valid(inscription.node) and player.global_position.distance_to(inscription.node.global_position + Vector3.UP) < 2.4:
+			labels.prompt.text = str(inscription.get("interact_hint", "[ E ] READ %s" % inscription.title))
 			return
-	for portal in portal_nodes:
-		if is_instance_valid(portal.node) and player.position.distance_to(portal.node.position + Vector3(0, 1.4, 0)) < 2.8:
-			labels.prompt.text = "[ E ] %s" % portal.label
+	for npc in npc_nodes:
+		if is_instance_valid(npc.node) and npc.node.is_visible_in_tree() and player.global_position.distance_to(npc.node.global_position + Vector3(0, 1.2, 0)) < 4.0:
+			labels.prompt.text = "[ E ] SPEAK WITH %s" % str(npc.speaker).to_upper()
 			return
+
+func _update_reticle_hint() -> void:
+	var origin := camera.global_position
+	var ray := PhysicsRayQueryParameters3D.create(origin, origin - camera.global_basis.z * 14.0, CombatSystems.ARC_MASK)
+	var hit := get_world_3d().direct_space_state.intersect_ray(ray)
+	var target := hit.get("collider") as Node3D
+	var hint := ""
+	var tint := Color.WHITE
+	if is_instance_valid(target):
+		var mechanism := target if target.has_meta("interact_hint") else target.get_parent()
+		if is_instance_valid(mechanism) and mechanism.has_meta("interact_hint"):
+			hint = mechanism.get_meta("interact_hint")
+			tint = Color("9ee6e8")
+		elif target in wards:
+			hint = "WARDING CRYSTAL — SHATTER [1 / 2 / 3 / 4]"
+			tint = Color("9ee6e8")
+		elif target is CharacterBody3D and target in enemies:
+			hint = _enemy_reticle_hint(target)
+			tint = Color("ffb18b")
+	if not hint.is_empty() and not labels.prompt.text.is_empty():
+		var lead := hint.get_slice(" — ", 0)
+		if labels.prompt.text.contains(lead):
+			hint = ""
+	labels.reticle_hint.text = hint
+	labels.crosshair.modulate = tint
+
+func _enemy_reticle_hint(enemy: CharacterBody3D) -> String:
+	match enemy.get_meta("kind"):
+		"executioner":
+			return "IRON EXECUTIONER [SHIELDED] — GRASP [G] • SHOCK [4] • PARRY [X]" if enemy.get_meta("has_shield", false) else "IRON EXECUTIONER"
+		"warden":
+			if not wards.is_empty():
+				return "LORD MALCOR — SEALED BY %d TOWER WARDS" % wards.size()
+			return "LORD MALCOR [AEGIS] — REFLECT [Q] • SHOCK [4] • PARRY [X]" if float(enemy.get_meta("aegis_hp")) > 0.0 else "LORD MALCOR — BELL WARDEN"
+		"stalker":
+			return "BELL-BOUND STALKER — BLIND HUNTER (LURE WITH URN [G])"
+		"ash_sentinel":
+			return "ASH SENTINEL — FROST IMMUNE (SHOCK [4] • THERMAL SHOCK)"
+		"colossus":
+			return "THE LADLE [OVERDRIVE] — STRIKE WHITE CHEST CORE!" if int(enemy.get_meta("hp", 640)) <= 320 else "THE LADLE — FROST IMMUNE (SHOCK [4] • CAULDRON CHAIN)"
+		_:
+			return str(enemy.get_meta("kind")).capitalize().to_upper()
 
 func _update_enemies(delta: float) -> void:
-	for entry in enemies.duplicate():
-		var enemy: CharacterBody3D = entry
-		if not is_instance_valid(enemy):
-			continue
-		var elem: ElementalComponent = enemy.get_meta("elemental")
-		var rig: Node3D = enemy.get_meta("rig")
-		var warning: Node3D = enemy.get_meta("warning")
-		var is_boss: bool = enemy.get_meta("boss")
-		var kind: String = enemy.get_meta("kind")
-
-		var elem_events := elem.tick(delta)
-		if elem_events.burn_tick:
-			_damage_enemy(enemy, int(10.0 * damage_mult), false)
-			if not is_instance_valid(enemy) or not enemies.has(enemy):
-				continue
-
-		var hf := maxf(0.0, float(enemy.get_meta("hit_flash", 0.0)) - delta * 6.0)
-		enemy.set_meta("hit_flash", hf)
-		var frost_amt := 1.0 if elem.is_solid_frozen() else (0.55 if elem.is_frozen() else 0.0)
-		var burn_amt := 1.0 if elem.is_burning() else 0.0
-		Meshes3D.set_rig_status(rig, hf, frost_amt, burn_amt)
-
-		enemy.set_meta("guard", maxf(0.0, float(enemy.get_meta("guard")) - delta))
-
-		if elem.is_solid_frozen():
-			warning.visible = false
-			Meshes3D.animate_enemy_rig(rig, elapsed, 0.0, 0.0, true, false)
-			continue
-
-		var stagger: float = enemy.get_meta("stagger")
-		if stagger > 0.0:
-			warning.visible = false
-			enemy.set_meta("stagger", maxf(0.0, stagger - delta))
-			var pre_speed := Vector2(enemy.velocity.x, enemy.velocity.z).length()
-			enemy.velocity.x = move_toward(enemy.velocity.x, 0, delta * 12.0)
-			enemy.velocity.z = move_toward(enemy.velocity.z, 0, delta * 12.0)
-			enemy.velocity.y -= GRAVITY * delta
-			enemy.move_and_slide()
-			if pre_speed > 7.5 and enemy.is_on_wall() and not enemy.get_meta("wall_slammed", false):
-				enemy.set_meta("wall_slammed", true)
-				_spell_impact(enemy.global_position + Vector3(0, 1.0, 0), Color("d6c6a4"))
-				camera_shake = maxf(camera_shake, 0.12)
-				narrative.show_style_banner("WALL SLAM! +28", Color("f0d297"))
-				_damage_enemy(enemy, int(28.0 * damage_mult), false)
-				if not is_instance_valid(enemy) or not enemies.has(enemy):
-					continue
-			if stagger - delta <= 0.0:
-				enemy.set_meta("wall_slammed", false)
-			Meshes3D.animate_enemy_rig(rig, elapsed, 0.0, 0.0, false, true)
-			continue
-
-		# Boss activation boundaries so bosses don't snipe you across the whole chapter
-		if kind == "warden" and player.global_position.z > -30.5:
-			Meshes3D.animate_enemy_rig(rig, elapsed, 0.0, 0.0, false, false)
-			continue
-
-		var to_player := player.global_position - enemy.global_position
-		var distance := Vector2(to_player.x, to_player.z).length()
-		var vertical_diff := absf(to_player.y)
-		if distance >= 28.0 or (not is_boss and vertical_diff > 5.0):
-			Meshes3D.animate_enemy_rig(rig, elapsed, 0.0, 0.0, false, false)
-			continue
-
-		# Blind sound-reactive Bell-Bound Stalker AI!
-		var nav_target := player.global_position
-		if kind == "stalker":
-			var noise := PhysicsSandbox.get_nearest_noise(noise_events, enemy.global_position, 24.0)
-			if not noise.is_empty():
-				nav_target = noise.pos
-			elif distance > 6.0:
-				# Stalker doesn't see well at distance without noise!
-				Meshes3D.animate_enemy_rig(rig, elapsed, 0.0, 0.0, false, false)
-				continue
-
-		if kind == "warden" and boss_phase >= 1:
-			enemy.position.y = lerpf(enemy.position.y, 11.8 + sin(elapsed * 2.6) * 0.45, delta * 2.5)
-
-		var look_vec := nav_target - enemy.global_position
-		if Vector2(look_vec.x, look_vec.z).length() > 0.08:
-			enemy.look_at(Vector3(nav_target.x, enemy.global_position.y, nav_target.z), Vector3.UP)
-
-		var slow := elem.slow_multiplier()
-		var windup: float = enemy.get_meta("windup")
-		if windup > 0.0:
-			warning.visible = true
-			windup -= delta * slow
-			enemy.set_meta("windup", maxf(0.0, windup))
-			enemy.velocity.x = move_toward(enemy.velocity.x, 0, delta * 14.0)
-			enemy.velocity.z = move_toward(enemy.velocity.z, 0, delta * 14.0)
-			if not (kind == "warden" and boss_phase >= 1):
-				enemy.velocity.y -= GRAVITY * delta
-				enemy.move_and_slide()
-			var wmax := maxf(0.1, float(enemy.get_meta("windup_max", 0.5)))
-			Meshes3D.animate_enemy_rig(rig, elapsed, 0.0, clampf(1.0 - windup / wmax, 0.0, 1.0), false, false)
-			if windup <= 0.0:
-				warning.visible = false
-				var pending: String = enemy.get_meta("pending")
-				if pending == "melee" and distance < (4.4 if is_boss else 2.8):
-					var raw_dmg := 26 if kind == "colossus" else 24 if is_boss else 20 if kind == "ash_sentinel" else 17 if kind == "stalker" else 16 if kind == "executioner" else 11
-					_hurt(raw_dmg, enemy.global_position, Color(0.75, 0.1, 0.05), enemy)
-					camera_shake = maxf(camera_shake, 0.16)
-				elif pending == "cast":
-					_enemy_cast(enemy, false)
-				elif pending == "tolling_wave":
-					_spawn_tolling_wave(enemy.global_position, 9.65 if kind == "warden" else 0.15)
-				elif pending == "dread_summon":
-					_sound_at("bell", enemy.global_position)
-					_enemy(Vector3(-8.5, 9.6, -45.0), false, "warden_shr_%d_a" % int(elapsed * 10), false, "shrieker")
-					_enemy(Vector3(8.5, 9.6, -45.0), false, "warden_shr_%d_b" % int(elapsed * 10), false, "shrieker")
-				elif pending == "boss_triple":
-					_enemy_cast_triple(enemy)
-				enemy.set_meta("pending", "")
-				enemy.set_meta("attack", 1.7 if is_boss and boss_phase > 0 else 2.2 if is_boss else 2.1 if kind == "acolyte" else 1.5)
-			continue
-
-		warning.visible = false
-		var horizontal := Vector3(look_vec.x, 0, look_vec.z).normalized()
-		var base_speed := 2.2 if is_boss else 4.6 if kind == "stalker" else 2.1 if kind == "ash_sentinel" else 2.4 if kind == "executioner" else 2.2 if kind == "acolyte" else 4.1
-		var move_speed := base_speed * slow
-		var desired := Vector3.ZERO
-		if kind == "acolyte":
-			if distance < 4.5:
-				desired = -horizontal * move_speed
-			elif distance > 9.5:
-				desired = horizontal * move_speed
-		elif Vector2(look_vec.x, look_vec.z).length() > (3.6 if is_boss else 1.85):
-			desired = horizontal * move_speed
-		enemy.velocity.x = move_toward(enemy.velocity.x, desired.x, delta * 10.0)
-		enemy.velocity.z = move_toward(enemy.velocity.z, desired.z, delta * 10.0)
-		if not (kind == "warden" and boss_phase >= 1):
-			enemy.velocity.y -= GRAVITY * delta
-			enemy.move_and_slide()
-		Meshes3D.animate_enemy_rig(rig, elapsed, Vector2(enemy.velocity.x, enemy.velocity.z).length(), 0.0, false, false)
-
-		var attack: float = float(enemy.get_meta("attack")) - delta * slow
-		if attack <= 0.0:
-			var next_attack := ""
-			if kind == "acolyte" and distance < 18.0:
-				next_attack = "cast"
-			elif kind == "warden":
-				if boss_phase >= 1:
-					next_attack = "boss_triple"
-				else:
-					var roll := rng.randf()
-					next_attack = "tolling_wave" if roll < 0.55 else "dread_summon" if (roll < 0.78 and enemies.size() < 4) else "melee"
-			elif kind == "colossus":
-				next_attack = "melee" if distance < 4.2 else "tolling_wave" if rng.randf() < 0.55 else "boss_triple"
-			elif distance < 2.45:
-				next_attack = "melee"
-			if next_attack != "":
-				var wdur := 0.65 if next_attack == "tolling_wave" else 0.55 if is_boss else 0.50 if kind == "executioner" or kind == "ash_sentinel" else 0.36
-				enemy.set_meta("pending", next_attack)
-				enemy.set_meta("windup", wdur)
-				enemy.set_meta("windup_max", wdur)
-				if kind == "stalker":
-					_sound_at("stalker", enemy.global_position)
-				attack = 0.0
-		enemy.set_meta("attack", attack)
+	EnemyAI.update_all(self, delta)
 
 func _spawn_tolling_wave(origin: Vector3, floor_y: float) -> void:
 	_sound_at("bell", origin)
@@ -2201,7 +2295,7 @@ func _spell_trail(pos: Vector3, color: Color, size: float = 0.023) -> void:
 	tween.tween_property(trail, "transparency", 1.0, 0.22)
 	tween.tween_callback(trail.queue_free)
 
-func _spell_impact(pos: Vector3, color: Color) -> void:
+func _spell_impact(pos: Vector3, color: Color, direction: Vector3 = Vector3.ZERO) -> void:
 	Visuals.spawn_impact_light(level_root, pos, color, 3.0, 6.5, 0.22)
 	for i in 5:
 		var offset := Vector3(rng.randf_range(-0.65, 0.65), rng.randf_range(-0.45, 0.45), rng.randf_range(-0.65, 0.65))
@@ -2215,6 +2309,8 @@ func _spell_impact(pos: Vector3, color: Color) -> void:
 		level_root.add_child(spark)
 		var tween := create_tween().bind_node(spark)
 		tween.set_parallel(true)
+		if not direction.is_zero_approx():
+			offset += direction * rng.randf_range(0.75, 1.6)
 		tween.tween_property(spark, "position", pos + offset, 0.28)
 		tween.tween_property(spark, "transparency", 1.0, 0.28)
 		tween.set_parallel(false)
@@ -2324,35 +2420,52 @@ func _update_bolts(delta: float) -> void:
 			bolts.erase(bolt)
 
 func _resolve_bolt_hit(bolt: Dictionary, hit: Dictionary) -> void:
-	var col = hit.collider
+	var col: Object = hit.collider
 	var hit_pos: Vector3 = hit.position
 	if bolt.kind == "cinder":
 		_cinder_aoe_burst(hit_pos)
 		return
+	var impact_color: Color = bolt.node.get_meta("color")
 	if bolt.kind == "frost":
 		_handle_frost_world_hit(col, hit_pos)
 	if col is CharacterBody3D and enemies.has(col):
-		if bolt.kind == "arbalest" and col.get_meta("has_shield", false) and float(col.get_meta("stagger")) <= 0.0 and not col.get_meta("elemental").is_frozen():
-			_sound_at("parry", hit_pos, 0.8)
-			_message("TOWER SHIELD BLOCKS BOLT — YANK WITH [G] OR SHOCK WITH [4]!", 1.8)
-		elif bolt.kind == "frost":
-			_apply_frost_to_enemy(col)
-		elif bolt.kind == "reflected":
-			_damage_enemy(col, int(60.0 * damage_mult))
-			if is_instance_valid(col) and col.get_meta("boss"):
-				col.set_meta("stagger", 3.0)
-				narrative.show_style_banner("REFLECTED STUN (3s)!", Color("61dbed"))
-		else:
-			_damage_enemy(col, int(42.0 * damage_mult))
-			if is_instance_valid(col) and col.get_meta("kind") == "shrieker":
-				col.velocity += bolt.velocity.normalized() * 10.0
+		match bolt.kind:
+			"frost":
+				_apply_frost_to_enemy(col)
+			"reflected":
+				if col.get_meta("kind") == "warden" and wards.is_empty():
+					_apply_warden_hit(col, int(65.0 * damage_mult), 90.0, "SONIC REFLECT!")
+				else:
+					_damage_enemy(col, int(60.0 * damage_mult))
+				if enemies.has(col) and col.get_meta("boss"):
+					col.set_meta("stagger", maxf(3.0, float(col.get_meta("stagger"))))
+					col.set_meta("windup", 0.0)
+					col.set_meta("pending", "")
+					if col.get_meta("kind") != "warden":
+						narrative.show_style_banner("REFLECTED STUN (3s)!", Color("61dbed"))
+			"arbalest":
+				if col.get_meta("has_shield", false):
+					CombatSystems.damage_executioner_shield(self, col, 18.0)
+					_sound_at("parry", hit_pos, 0.8)
+					_message("SHIELD BLOCKS BOLT — GRASP [G], SHOCK [4], OR PARRY [X]!", 1.8)
+				else:
+					var weakpoint: bool = (col.get_meta("kind") != "warden" or wards.is_empty()) and CombatSystems.is_weakpoint_hit(col, hit_pos)
+					var dmg := int(42.0 * damage_mult * (1.5 if weakpoint else 1.0))
+					_apply_warden_hit(col, dmg, 24.0, "")
+					if weakpoint:
+						impact_color = Color("ffd875")
+						hitmarker_time = 0.18
+						labels.hitmarker.modulate = impact_color
+						narrative.show_style_banner("WEAKPOINT CRIT!", impact_color)
+					if enemies.has(col) and col.get_meta("kind") == "shrieker":
+						col.velocity += bolt.velocity.normalized() * 10.0
 	elif col is RigidBody3D and breakables.has(col):
 		_smash_pot(col)
 	elif col is StaticBody3D and wards.has(col):
 		_shatter_ward(col)
 	elif col is Node3D and shootable_targets.has(col):
 		_hit_shootable_target(col, bolt.kind)
-	_spell_impact(hit_pos, bolt.node.get_meta("color"))
+	_spell_impact(hit_pos, impact_color)
 
 func _apply_frost_to_enemy(enemy: CharacterBody3D) -> void:
 	var elem: ElementalComponent = enemy.get_meta("elemental")
@@ -2376,14 +2489,15 @@ func _cinder_aoe_burst(pos: Vector3) -> void:
 	_sound_at("maul", pos)
 	_shockwave(pos + Vector3(0, 0.1, 0), Color("ff6e24"), 4.2)
 	_spell_impact(pos, Color("ff7828"))
-	Visuals.spawn_decal(level_root, pos, "scorch", 2.8)
+	_spawn_fire_patch(pos)
 	camera_shake = maxf(camera_shake, 0.16)
 	for entry in enemies.duplicate():
 		var e: CharacterBody3D = entry
 		if is_instance_valid(e) and e.global_position.distance_to(pos) < 4.5:
 			var elem: ElementalComponent = e.get_meta("elemental")
 			var res := elem.apply_burn(5.0)
-			_damage_enemy(e, int(48.0 * damage_mult))
+			CombatSystems.damage_executioner_shield(self, e, 45.0)
+			_apply_warden_hit(e, int(48.0 * damage_mult), 35.0, "CINDER BLAST")
 			if res.thermal_shock and is_instance_valid(e) and enemies.has(e):
 				_trigger_thermal_shock(e)
 	for pot in breakables.duplicate():
@@ -2392,6 +2506,49 @@ func _cinder_aoe_burst(pos: Vector3) -> void:
 	for w in wards.duplicate():
 		if is_instance_valid(w) and w.global_position.distance_to(pos) < 4.2:
 			_shatter_ward(w)
+	for target in shootable_targets.duplicate():
+		if is_instance_valid(target) and shootable_targets.has(target) and target.global_position.distance_to(pos) < 4.2:
+			_hit_shootable_target(target, "cinder")
+	if is_instance_valid(tower_pendulum) and tower_pendulum.global_position.distance_to(pos) < 4.8:
+		_hit_tower_pendulum()
+
+func _spawn_fire_patch(impact_pos: Vector3) -> void:
+	var ray := PhysicsRayQueryParameters3D.create(impact_pos + Vector3.UP * 0.15, impact_pos + Vector3.DOWN * 40.0, LAYER_WORLD)
+	var ground := get_world_3d().direct_space_state.intersect_ray(ray)
+	var pos: Vector3 = ground.get("position", impact_pos)
+	var tint := Color(1.0, 0.26, 0.06, 0.24)
+	var material := _material(tint, true)
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	var patch := LevelBuilder.cylinder(level_root, "burning_embers", pos + Vector3.UP * 0.02, FIRE_PATCH_RADIUS, 0.035, material, false, 32)
+	var light := _light(pos + Vector3.UP * 0.4, Color("ff631f"), 2.6, 5.5)
+	light.reparent(patch)
+	Visuals.spawn_decal(level_root, pos, "scorch", 2.8)
+	active_fire_patches.append({"node": patch, "light": light, "time_left": 4.0, "tick_in": FIRE_PATCH_TICK})
+
+func _update_fire_patches(delta: float) -> void:
+	for i in range(active_fire_patches.size() - 1, -1, -1):
+		var patch := active_fire_patches[i]
+		patch.tick_in -= minf(delta, patch.time_left)
+		patch.time_left -= delta
+		while patch.tick_in <= 0.0:
+			patch.tick_in += FIRE_PATCH_TICK
+			var pos: Vector3 = patch.node.global_position
+			_spell_trail(pos + Vector3(rng.randf_range(-1.6, 1.6), 0.22, rng.randf_range(-1.6, 1.6)), Color("ff7828"), 0.018)
+			for enemy in enemies.duplicate():
+				if not is_instance_valid(enemy) or enemy.global_position.distance_squared_to(pos) > FIRE_PATCH_RADIUS * FIRE_PATCH_RADIUS:
+					continue
+				var elem: ElementalComponent = enemy.get_meta("elemental")
+				var result := elem.apply_burn(3.0)
+				_apply_warden_hit(enemy, int(14.0 * damage_mult), 0.0, "", false)
+				if result.thermal_shock and enemies.has(enemy):
+					_trigger_thermal_shock(enemy)
+		if patch.time_left <= 0.0:
+			patch.node.queue_free()
+			active_fire_patches.remove_at(i)
+		else:
+			var fade := minf(1.0, patch.time_left * 2.0)
+			patch.light.light_energy = (2.2 + sin(elapsed * 13.0 + i) * 0.65) * fade
+			patch.node.get_child(0).transparency = 1.0 - fade
 
 func _handle_frost_world_hit(col: Object, hit_pos: Vector3) -> void:
 	if chapter_id == "ch1_court":
@@ -2489,6 +2646,9 @@ func _hit_shootable_target(target: Node3D, bolt_kind: String) -> void:
 		_handle_frost_world_hit(target, target.global_position)
 
 func _update_pickups(delta: float) -> void:
+	# In the scripted pour the hot prop becomes a pickup only when quenching ends.
+	if level_root.has_meta("hot_key"):
+		_show_hot_key_hint(level_root.get_meta("hot_key"))
 	for item in pickups.duplicate():
 		var node: Node3D = item.node
 		if not is_instance_valid(node):
@@ -2497,6 +2657,9 @@ func _update_pickups(delta: float) -> void:
 		node.rotation.y += delta * 1.8
 		node.position.y = item.y + sin(elapsed * 3.0 + item.y) * 0.08
 		if player.global_position.distance_to(node.global_position) < 1.85:
+			if node.get_meta("too_hot", false):
+				_show_hot_key_hint(node)
+				continue
 			match item.kind:
 				"mana":
 					mana = mini(max_mana, mana + 35)
@@ -2510,7 +2673,9 @@ func _update_pickups(delta: float) -> void:
 				"iron_lever":
 					_state().has_lever = true
 					_message("IRON LEVER ACQUIRED  •  INSERT AT NORTH GEARBOX", 3.5)
-					if not _state().get("ambush_done", false):
+					if story_director.start_sequence("ch1_court/ossuary_blackout"):
+						story_director.start_sequence("ch1_court/torin_relocates")
+					elif not story_director.has_sequence("ch1_court/ossuary_blackout") and not _state().get("ambush_done", false):
 						_state().ambush_done = true
 						ambush_dark_timer = 2.0
 						ambush_pending = true
@@ -2560,15 +2725,17 @@ func _update_pickups(delta: float) -> void:
 			node.queue_free()
 			pickups.erase(item)
 
+func _show_hot_key_hint(key: Node3D) -> void:
+	if not is_instance_valid(key) or player.global_position.distance_to(key.global_position) >= 1.85:
+		return
+	if labels.message.text != HOT_KEY_MESSAGE or message_time <= 0.0:
+		_message(HOT_KEY_MESSAGE, 1.6)
+
 func _trigger_kiln_meltdown() -> void:
 	if _state().get("gauntlet_triggered", false):
 		return
 	_state().gauntlet_triggered = true
-	_sound("alarm")
-	camera_shake = maxf(camera_shake, 0.35)
 	ChapterKiln.spawn_meltdown_encounter(self)
-	narrative.show_style_banner("MELTDOWN — CRUCIBLE COLOSSUS AWAKENS!", Color("ff5c1a"))
-	narrative.say("ARCHIVIST SERAPHINA", "The crucible is overflowing! The Crucible Colossus is guarding the Great Gate—use Frost + Thurible, Voltaic Overload, or drop the overhead slag cauldron on it!", 6.2, Color("70d7df"))
 
 func _update_breakables() -> void:
 	for pot in breakables.duplicate():
@@ -2579,8 +2746,10 @@ func _attack() -> void:
 	if cooldown > 0.0:
 		return
 	if mode == 0:
-		cooldown = 0.44
-		swing_time = 0.44
+		axe_combo_step = (axe_combo_step + 1) % 3 if axe_combo_timer > 0.0 else 0
+		axe_combo_timer = 1.15
+		cooldown = AXE_SWING_TIMES[axe_combo_step]
+		swing_time = cooldown
 		swing_contact_done = false
 	elif mode == 1:
 		if green_mana < 5:
@@ -2627,28 +2796,28 @@ func _thurible_release() -> void:
 	bolts.append({"node": orb, "direction": dir, "velocity": dir * 18.0 + Vector3(0, 4.8, 0), "gravity": 14.0, "life": 2.2, "kind": "cinder"})
 
 func _frost_cast() -> void:
-	if cooldown > 0.0 or hp <= 0:
+	if offhand_cooldown > 0.0 or hp <= 0:
 		return
 	if mana < 10:
 		_message("NOT ENOUGH BLUE MANA FOR FROST (NEEDS 10)", 1.2)
 		return
 	mana -= 10
 	_refresh_hud_numbers()
-	cooldown = 0.48
+	offhand_cooldown = 0.48
 	_sound("frost")
 	var dir := -camera.global_transform.basis.z
 	var bolt := _spell_orb(camera.global_position + dir * 0.7, "frost")
 	bolts.append({"node": bolt, "direction": dir, "velocity": dir * 28.0, "gravity": 0.0, "life": 1.8, "kind": "frost"})
 
 func _repulse() -> void:
-	if cooldown > 0.0 or hp <= 0:
+	if offhand_cooldown > 0.0 or hp <= 0:
 		return
 	if mana < 15:
 		_message("NOT ENOUGH BLUE MANA FOR REPULSE (NEEDS 15)", 1.2)
 		return
 	mana -= 15
 	_refresh_hud_numbers()
-	cooldown = 0.45
+	offhand_cooldown = 0.45
 	_sound("repulse")
 	_shockwave(player.global_position + Vector3(0, 0.12, 0), Color("61dbed"), 6.5)
 	camera_shake = maxf(camera_shake, 0.12)
@@ -2689,6 +2858,7 @@ func _repulse() -> void:
 			push_dir.y = 0
 			push_dir = push_dir.normalized() if push_dir.length() > 0.01 else flat_fwd
 			body.velocity += push_dir * (7.5 if body.get_meta("boss") else 16.5) + Vector3.UP * 3.0
+			CombatSystems.damage_executioner_shield(self, body, 40.0)
 			_damage_enemy(body, int(16.0 * damage_mult))
 			parry_window = 1.6
 		elif body == tower_pendulum:
@@ -2746,50 +2916,71 @@ func _hit_tower_pendulum() -> void:
 
 func _axe_contact() -> void:
 	_sound("axe")
-	var from := camera.global_position
-	var to := from + -camera.global_transform.basis.z * 3.5
-	var query := PhysicsRayQueryParameters3D.create(from, to, LAYER_WORLD | LAYER_ENEMY | LAYER_PUSHABLE | LAYER_TARGET)
-	query.exclude = [player.get_rid()]
-	var hit := get_world_3d().direct_space_state.intersect_ray(query)
-	if hit.is_empty():
-		return
-	var col = hit.collider
-	if col is CharacterBody3D and enemies.has(col):
+	var forward := -camera.global_transform.basis.z
+	var heavy := axe_combo_step == 2
+	var sweep := CombatSystems.melee_cleave_sweep(self, camera.global_position, forward, 3.85 if heavy else 3.65, axe_combo_step)
+	var had_counter := parry_window > 0.0
+	if not sweep.enemies.is_empty():
+		parry_window = 0.0
 		hitstop_time = 0.035
-		var elem: ElementalComponent = col.get_meta("elemental")
-		var dmg := 46
-		if elem.is_solid_frozen():
-			dmg = int(125.0 * damage_mult)
+		camera_shake = maxf(camera_shake, 0.14 if heavy else 0.09)
+		view_kick = -0.08 if heavy else -0.05
+
+	for enemy: CharacterBody3D in sweep.enemies:
+		mana = mini(max_mana, mana + 6)
+		_refresh_hud_numbers()
+		var elem: ElementalComponent = enemy.get_meta("elemental")
+		var frozen := elem.is_solid_frozen()
+		var shield_chip := 55.0 if heavy else 25.0
+		var base_damage := 46.0 * (CombatSystems.HEAVY_CLEAVE_MULTIPLIER if heavy else 1.0)
+		var hit_color := Color("ffad70") if enemy.get_meta("armored", false) else Color("e2533c")
+		if frozen:
+			base_damage = 125.0
+			shield_chip = CombatSystems.SHIELD_HP
+			hit_color = Color("88e9f5")
 			elem.clear_all()
-			_sound_at("frost", col.global_position)
-			narrative.show_style_banner("FROZEN SHATTER!", Color("88e9f5"))
-		elif parry_window > 0.0:
-			dmg = int(76.0 * damage_mult)
-			parry_window = 0.0
-			mana = mini(max_mana, mana + 15)
-			_refresh_hud_numbers()
-			narrative.show_style_banner("COUNTER-CLEAVE! (+15 MANA)", Color("ffd875"))
-		else:
-			dmg = int(float(dmg) * damage_mult)
-		# Heavy axe strikes can also crack Executioner shields
-		if col.get_meta("has_shield", false) and parry_window > 0.0:
-			CombatSystems.try_yank_shield(self, col)
-		_damage_enemy(col, dmg)
-		camera_shake = maxf(camera_shake, 0.09)
-		view_kick = -0.05
-	elif col is RigidBody3D and breakables.has(col):
+			_sound_at("frost", enemy.global_position)
+			narrative.show_style_banner("FROZEN SHATTER!", hit_color)
+		elif had_counter:
+			base_damage = 78.0
+			shield_chip = CombatSystems.SHIELD_HP
+			hit_color = Color("ffd875")
+			narrative.show_style_banner("COUNTER-CLEAVE!", hit_color)
+		var shield_broken := CombatSystems.damage_executioner_shield(self, enemy, shield_chip)
+		var contact := enemy.global_position + Vector3.UP * (1.7 if enemy.get_meta("boss", false) else 1.15) - forward * 0.35
+		var across := camera.global_basis.x * (-1.0 if axe_combo_step == 0 else 1.0)
+		var spray := (forward * 0.55 + (Vector3.DOWN if heavy else across) * 0.55).normalized()
+		_spell_impact(contact, hit_color, spray)
+		_apply_warden_hit(enemy, int(base_damage * damage_mult), shield_chip, "")
+		if heavy and (shield_broken or not enemies.has(enemy)):
+			narrative.show_style_banner("EXECUTION CLEAVE!", Color("ffd875"))
+
+	for pot: RigidBody3D in sweep.breakables:
+		_smash_pot(pot)
 		hitstop_time = 0.035
-		_smash_pot(col)
 		camera_shake = maxf(camera_shake, 0.05)
-	elif col is StaticBody3D and wards.has(col):
+	for ward: StaticBody3D in sweep.wards:
+		_shatter_ward(ward)
 		hitstop_time = 0.035
-		_shatter_ward(col)
 		camera_shake = maxf(camera_shake, 0.08)
-	elif col is Node3D and shootable_targets.has(col) and col.get_meta("shootable_rope", false):
-		_hit_shootable_target(col, "axe")
-	else:
+	for target: Node3D in sweep.targets:
+		if is_instance_valid(target) and shootable_targets.has(target):
+			_hit_shootable_target(target, "axe")
+	if sweep.pendulum:
+		_hit_tower_pendulum()
+	elif sweep.hit_world and sweep.enemies.is_empty() and sweep.breakables.is_empty() and sweep.wards.is_empty() and sweep.targets.is_empty():
 		_message("STEEL STRIKES STONE", 0.5)
 		camera_shake = maxf(camera_shake, 0.03)
+
+func _apply_warden_hit(enemy: CharacterBody3D, base_dmg: int, aegis_chip: float, source_label: String, knockback: bool = true) -> void:
+	var final_dmg := base_dmg
+	if enemy.get_meta("kind") == "warden" and wards.is_empty():
+		if float(enemy.get_meta("aegis_hp", 0.0)) > 0.0:
+			CombatSystems.damage_warden_aegis(self, enemy, aegis_chip, source_label)
+			final_dmg = maxi(1, roundi(base_dmg * CombatSystems.AEGIS_BLEED_THROUGH))
+		elif float(enemy.get_meta("aegis_exposed_timer", 0.0)) > 0.0:
+			final_dmg = roundi(base_dmg * CombatSystems.AEGIS_EXPOSED_MULTIPLIER)
+	_damage_enemy(enemy, final_dmg, knockback)
 
 func _damage_enemy(enemy: CharacterBody3D, damage: int, knockback: bool = true) -> void:
 	if not is_instance_valid(enemy) or not enemies.has(enemy):
@@ -2823,16 +3014,18 @@ func _damage_enemy(enemy: CharacterBody3D, damage: int, knockback: bool = true) 
 		_objective()
 		if health > 0 and health <= 260 and boss_phase == 0:
 			boss_phase = 1
-			world_env.background_color = Color("0a0612")
-			_sound("bell")
-			narrative.show_style_banner("PHASE II — REFLECT SONIC ORBS!", Color("d99cbd"))
+			if story_director.has_sequence("ch2_tower/warden_phase_two"):
+				story_director.start_sequence("ch2_tower/warden_phase_two")
+			else:
+				narrative.show_style_banner("PHASE II — REFLECT SONIC ORBS!", Color("d99cbd"))
 	elif kind == "colossus":
 		_state().colossus_hp = maxi(0, health)
 		_objective()
 		if health > 0 and health <= 320 and boss_phase == 0:
 			boss_phase = 1
-			_sound("alarm")
-			narrative.show_style_banner("COLOSSUS OVERDRIVE!", Color("ff5c1a"))
+			Meshes3D.set_colossus_overdrive(enemy.get_meta("rig"), true)
+			enemy.set_meta("colossus_overdrive_visual", true)
+			story_director.start_sequence("ch3_kiln/colossus_overdrive")
 
 	_sound_at("hit", enemy.global_position)
 	var spark := LevelBuilder.cylinder(level_root, "impact", enemy.global_position + Vector3(0, 1.3, 0), 0.25, 0.4, mats.ember, false, 5)
@@ -2860,25 +3053,19 @@ func _damage_enemy(enemy: CharacterBody3D, damage: int, knockback: bool = true) 
 
 		if kind == "warden":
 			_state().boss_dead = true
-			_sound("bell", 0.6)
-			_sound("maul")
+			level_root.set_meta("warden_death_position", enemy.global_position)
 			boss = null
-			if is_instance_valid(belfry_floorboards):
-				belfry_floorboards.visible = false
-				belfry_floorboards.collision_layer = 0
-			_portal(Vector3(0, 7.0, -42.0), "ch3_kiln", "DESCEND TO THE KILN OF ASH")
+			story_director.start_sequence("ch2_tower/belfry_shaft")
+			ChapterTower.sync_visual_state(self, _state())
 			_objective()
-			narrative.show_style_banner("LORD MALCOR SLAIN!", Color("ffd875"))
-			narrative.say("LORD MALCOR (DYING BREATH)", "The bell is quiet... go down into the Kiln, Caelen. Do not let the Choir claim the Gate.", 5.8, Color("d99cbd"))
 			enemy.queue_free()
 		elif kind == "colossus":
 			_state().colossus_dead = true
-			_sound("maul", 0.65)
-			_sound("bell", 0.55)
 			boss = null
+			level_root.set_meta("ladle_fall_pos", enemy.global_position)
+			story_director.register_mark("ladle_fall", enemy.global_position + Vector3.UP)
+			story_director.start_sequence("ch3_kiln/colossus_falls")
 			_objective()
-			narrative.show_style_banner("CRUCIBLE COLOSSUS SHATTERED!", Color("ffd875"))
-			narrative.say("ARCHIVIST SERAPHINA", "It's down! Take the Ashen Key to the Great Gate now before the slag swallows the forecourt!", 5.0, Color("70d7df"))
 			enemy.queue_free()
 		else:
 			if kind == "executioner" or kind == "ash_sentinel" or kind == "stalker":
@@ -2921,13 +3108,65 @@ func _heal() -> void:
 	_refresh_hud_numbers()
 	_message("ALCHEMICAL FLASK RESTORES 45 HP", 1.7)
 
-func _use() -> void:
-	if hp <= 0 or won:
+func _find_unpick_lock() -> Node3D:
+	if chapter_id != "ch1_court":
+		return null
+	var st := _state()
+	var nearest: Node3D
+	var distance := 2.8
+	for node: Node3D in [cistern_sluice_lever, switch_node, shortcut_door]:
+		if not _is_locked(node, st):
+			continue
+		var gap := player.global_position.distance_to(node.global_position + Vector3.UP)
+		if gap < distance:
+			nearest = node
+			distance = gap
+	if nearest != null:
+		return nearest
+	var origin := camera.global_position
+	var ray := PhysicsRayQueryParameters3D.create(origin, origin - camera.global_basis.z * 3.5, LAYER_WORLD | LAYER_TARGET, [player.get_rid()])
+	var hit := get_world_3d().direct_space_state.intersect_ray(ray)
+	var target := hit.get("collider") as Node3D
+	while is_instance_valid(target) and target != level_root:
+		if _is_locked(target, st):
+			return target
+		target = target.get_parent_node_3d()
+	return null
+
+func _is_locked(node: Node3D, st: Dictionary) -> bool:
+	if not is_instance_valid(node) or not node.get_meta("unpick", false):
+		return false
+	var id := str(node.get_meta("lock_id", ""))
+	return not id.is_empty() and not st.get(id + "_unpicked", false)
+
+func _step_unpick(delta: float) -> void:
+	if unpick_held and unpick_tumblers == 3:
 		return
-	for npc in npc_nodes:
-		if is_instance_valid(npc.node) and player.position.distance_to(npc.node.position + Vector3(0, 1.2, 0)) < 4.0:
-			_trigger_npc_dialogue(npc)
-			return
+	var target := _find_unpick_lock() if unpick_held else null
+	if target != unpick_lock or target == null:
+		unpick_lock = target
+		unpick_time = 0.0
+		unpick_tumblers = 0
+	if target == null:
+		return
+	unpick_time += delta
+	var thresholds := [0.33, 0.66, 1.0]
+	while unpick_tumblers < thresholds.size() and unpick_time + 0.000001 >= thresholds[unpick_tumblers]:
+		_sound_at("key_turn", target.global_position, 0.85 + unpick_tumblers * 0.18)
+		unpick_tumblers += 1
+	if unpick_tumblers == 3:
+		var id := str(target.get_meta("lock_id"))
+		var st := _state()
+		st[id + "_unpicked"] = true
+		if id == "sluice_lock":
+			st.sluice_unpicked = true
+		_sound_at("lever", target.global_position)
+		ChapterCourt.sync_visual_state(self, st)
+		_message("LOCK UNPICKED  [ • • • ]", 0.9)
+
+func _use() -> void:
+	if hp <= 0 or _find_unpick_lock() != null:
+		return
 	for font in fonts:
 		if is_instance_valid(font) and player.position.distance_to(font.position + Vector3(0, 1.0, 0)) < 2.6:
 			flasks = maxi(flasks, 3)
@@ -2940,32 +3179,29 @@ func _use() -> void:
 	var st := _state()
 	if chapter_id == "ch1_court":
 		if is_instance_valid(cistern_sluice_lever) and not st.get("cistern_raised", false) and player.position.distance_to(cistern_sluice_lever.position + Vector3(0, 1.0, 0)) < 2.8:
+			if not st.sluice_lock_unpicked:
+				return
 			st.cistern_raised = true
-			_sound("lever")
-			_sound("splash")
-			narrative.show_style_banner("CISTERN FLOODING — RIDE THE RAFTS!", Color("70d7df"))
+			story_director.start_sequence("ch1_court/cistern_sluice")
+			ChapterCourt.sync_visual_state(self, st)
+			_objective()
 			return
 		if is_instance_valid(switch_node) and not gate_open and player.position.distance_to(switch_node.position + Vector3(0, 1.2, 0)) < 2.8:
 			if not st.get("has_lever", false):
 				_message("THE GEARBOX NEEDS THE IRON LEVER FROM THE EAST OSSUARY", 2.8)
 				return
-			st.lever_inserted = true
-			switch_node.get_meta("lever_arm").visible = true
-			_sound("lever")
-			var pressed := 0
-			for p in pressure_plates:
-				if p.pressed:
-					pressed += 1
-			if pressed >= 2:
-				gate_open = true
-				st.gate_open = true
-				narrative.show_style_banner("PORTCULLIS UNLOCKED!", Color("ffd875"))
-			else:
-				_message("CHAIN SLIPS HALFWAY! WEIGHT BOTH BASIN PLATES TO COUNTERBALANCE!", 3.8)
+			if not st.gearbox_unpicked:
+				return
+			if not st.lever_inserted:
+				st.lever_inserted = true
+				switch_node.get_meta("lever_arm").visible = true
+				_sound("lever")
+			ChapterCourt.sync_visual_state(self, st)
+			_message(str(switch_node.get_meta("interact_hint", "")), 2.8)
 			_objective()
 			return
 		if is_instance_valid(shortcut_door) and not st.get("shortcut_open", false) and player.position.distance_to(shortcut_door.position + Vector3(0, 1.5, 0)) < 2.8:
-			if player.position.x > 9.0:
+			if player.position.x > shortcut_door.global_position.x and st.ossuary_gate_unpicked:
 				st.shortcut_open = true
 				shortcut_door.collision_layer = 0
 				create_tween().bind_node(shortcut_door).tween_property(shortcut_door, "position:y", 4.6, 0.5)
@@ -2993,71 +3229,43 @@ func _use() -> void:
 			if is_instance_valid(trough_water):
 				trough_water.visible = true
 			create_tween().bind_node(aqueduct_valve.get_meta("wheel")).tween_property(aqueduct_valve.get_meta("wheel"), "rotation:y", TAU, 0.6)
-			_sound("lever")
-			_sound("splash")
-			narrative.show_style_banner("CRUCIBLE TROUGH FLOODED!", Color("70d7df"))
+			story_director.start_sequence("ch3_kiln/aqueduct_surge")
 			_objective()
 			return
-		if is_instance_valid(hoist_lever) and not st.get("key_forged", false) and player.position.distance_to(hoist_lever.position + Vector3(0, 1.2, 0)) < 2.8:
-			if not st.get("trough_flooded", false):
-				_message("COOLING TROUGH IS DRY — OPEN THE AQUEDUCT VALVE FIRST!", 2.8)
-				return
-			if not st.get("dam_broken", false):
-				_message("HOIST UNPOWERED — SMASH THE SMELTERY SLAG DAM WITH THE ORE-CART!", 3.0)
-				return
-			st.key_forged = true
-			_sound("lever")
-			_sound("frost")
-			if is_instance_valid(key_mold):
-				key_mold.visible = false
-			_shockwave(Vector3(0, 0.8, -5.0), Color("8ce8f5"), 4.2)
-			_pickup(ChapterKiln.KEY_PICKUP, "ashen_key", "kiln_ashen_key")
-			narrative.show_style_banner("ASHEN KEY FORGED!", Color("ffd875"))
-			_objective()
+		if is_instance_valid(hoist_lever) and player.position.distance_to(hoist_lever.position + Vector3(0, 1.2, 0)) < 2.8:
+			var feedback := ChapterKiln.pull_hoist_lever(self)
+			if not feedback.is_empty():
+				_message(feedback, 2.8)
 			return
-		if not st.get("great_gate_open", false) and player.position.distance_to(Vector3(0, 1.5, -36.4)) < 4.0:
-			if not has_ashen_key:
-				_message("THE GREAT GATE IS SEALED — FORGE THE ASHEN KEY", 2.8)
-				return
-			if not st.get("colossus_dead", false):
-				_message("DEFEAT THE CRUCIBLE COLOSSUS TO UNSEAL THE GREAT GATE!", 2.8)
-				return
-			st.great_gate_open = true
-			if is_instance_valid(great_gate_left):
-				great_gate_left.collision_layer = 0
-			if is_instance_valid(great_gate_right):
-				great_gate_right.collision_layer = 0
-			_sound("bell", 0.55)
-			_sound("lever")
-			_win()
+		if not st.get("great_gate_open", false) and player.global_position.distance_to(ChapterKiln.GATE_APPROACH) < 4.0:
+			var feedback := ChapterKiln.turn_great_gate(self)
+			if not feedback.is_empty():
+				_message(feedback, 2.8)
 			return
 
 	for inscription in inscriptions:
-		if is_instance_valid(inscription.node) and player.position.distance_to(inscription.node.position + Vector3(0, 1, 0)) < 2.4:
+		if is_instance_valid(inscription.node) and player.global_position.distance_to(inscription.node.global_position + Vector3.UP) < 2.4:
 			_message("%s\n%s" % [inscription.title, inscription.writing], 5.5)
 			_story_event("inscription_" + inscription.title.to_lower().replace(" ", "_"), inscription.title, inscription.writing)
+			var on_read: Callable = inscription.get("on_read", Callable())
+			if on_read.is_valid():
+				on_read.call()
+			var inscription_id := str(inscription.get("id", ""))
+			var title := str(inscription.title).to_upper()
+			if inscription_id == "hesk_planks" or title in ["HESK", ChapterCourt.HESK_TITLE]:
+				level_states["ch1_court"].read_hesk_planks = true
+			if inscription_id == "tithe_roll" or title == "THE TITHE ROLL":
+				level_states["ch3_kiln"].read_tithe_roll = true
+			return
+	for npc in npc_nodes:
+		if is_instance_valid(npc.node) and npc.node.is_visible_in_tree() and player.global_position.distance_to(npc.node.global_position + Vector3(0, 1.2, 0)) < 4.0:
+			_trigger_npc_dialogue(npc)
 			return
 
-	for portal in portal_nodes:
-		if not is_instance_valid(portal.node) or player.position.distance_to(portal.node.position + Vector3(0, 1.4, 0)) >= 2.8:
-			continue
-		var dest: String = str(portal.destination)
-		if dest == "courtyard":
-			dest = "ch1_court"
-		elif dest == "tower":
-			dest = "ch2_tower"
-		elif dest == "kiln":
-			dest = "ch3_kiln"
-		if ChapterRegistry.CHAPTERS.has(dest):
-			_load_chapter(dest, true)
-		return
-
 func _win() -> void:
-	_story_event("ending", "ACT I COMPLETE — THE GREAT GATE UNSEALS", "The Crucible Colossus lies in molten ruin. As the Great Gate grinds open, a pale-violet wind sweeps through the Kiln—and the Hollow Choir calls Caelen's name from beyond. Chapter IV awaits.", "")
-	SaveSystem.write_save(self, true)
 	won = true
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-	ending_panel.visible = true
+	narrative.show_act_complete_banner()
+	_on_checkpoint_reached("kiln_act_complete", "Act I Complete")
 	_objective()
 
 func _save_game() -> void:
@@ -3100,15 +3308,18 @@ func _load_game(from_checkpoint: bool = false) -> void:
 	seen_echoes = data.get("seen_echoes", {}).duplicate(true)
 	triggered_volumes = data.get("triggered_volumes", {}).duplicate(true)
 
-	_load_chapter(str(data.get("chapter_id", "ch1_court")), false)
-	var pos: Array = data.get("pos", [0, 0.1, 42])
-	player.position = Vector3(float(pos[0]), float(pos[1]), float(pos[2]))
+	_load_chapter(str(data.get("chapter_id", "ch1_court")), false, false)
+	var pos: Array = data.get("pos", [])
+	var default_spawn: Vector3 = ChapterRegistry.get_chapter_meta(chapter_id).default_spawn
+	player.position = Vector3(float(pos[0]), float(pos[1]), float(pos[2])) if pos.size() == 3 else default_spawn
 	player.rotation.y = float(data.get("yaw", 0.0))
 	pitch = float(data.get("pitch", 0.0))
 	head.rotation.x = pitch
 	_build_weapon()
 	_refresh_hud_numbers()
-	won = false
+	_reset_arrival_motion()
+	won = bool(level_states["ch3_kiln"].get("act_complete", false))
 	ending_panel.visible = false
+	_objective()
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	narrative.show_style_banner("CHECKPOINT LOADED" if from_checkpoint else "QUICKSAVE LOADED", Color("70d7df"))

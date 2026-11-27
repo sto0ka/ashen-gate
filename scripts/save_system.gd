@@ -114,7 +114,112 @@ static func read_save(is_checkpoint: bool = false) -> Dictionary:
 	var data := _read_json(CHECKPOINT_PATH if is_checkpoint else QUICKSAVE_PATH)
 	if not data.has("schema_version") and data.has("stage"):
 		data = _upgrade_legacy_save(data)
+	var states: Variant = data.get("level_states")
+	if states is Dictionary:
+		var flags: Variant = data.get("story_flags")
+		data["level_states"] = normalize_level_states(states, flags if flags is Array else [])
 	return data if _is_valid_save(data) else {}
+
+# Merge every saved chapter over ChapterRegistry.default_state(), repair types,
+# rebuild story_world and apply pre-story-world migrations. Unknown fields are
+# preserved. Non-dictionary entries stay as-is so validation still rejects them.
+static func normalize_level_states(raw_states: Dictionary, story_flags: Array = []) -> Dictionary:
+	var result := {}
+	for key: Variant in raw_states:
+		var raw: Variant = raw_states[key]
+		var chapter_id := _chapter_key(key)
+		if chapter_id.is_empty() or not raw is Dictionary or not ChapterRegistry.CHAPTERS.has(chapter_id):
+			result[chapter_id if not chapter_id.is_empty() else key] = raw.duplicate(true) if raw is Dictionary or raw is Array else raw
+			continue
+		var raw_state: Dictionary = raw
+		var state := ChapterRegistry.default_state(chapter_id)
+		for field: Variant in raw_state:
+			if field == "story_world":
+				continue
+			var value: Variant = raw_state[field]
+			state[field] = _coerce(value, state[field]) if state.has(field) else _copy(value)
+		var raw_world: Dictionary = raw_state.story_world if raw_state.get("story_world") is Dictionary else {}
+		var world: Dictionary = state.story_world
+		for field: Variant in raw_world:
+			if field == "completed_sequences":
+				continue
+			var value: Variant = raw_world[field]
+			world[field] = _coerce(value, world[field]) if world.has(field) else _copy(value)
+		world["completed_sequences"] = _clean_sequences(raw_world.get("completed_sequences"))
+		_migrate_chapter_state(chapter_id, state, world, raw_world, story_flags)
+		result[chapter_id] = state
+	return result
+
+static func _migrate_chapter_state(chapter_id: String, state: Dictionary, world: Dictionary, raw_world: Dictionary, story_flags: Array) -> void:
+	match chapter_id:
+		"ch1_court":
+			if _is_true(state.get("gate_open")):
+				state["siege_stage"] = maxi(3, int(_number_or(state.get("siege_stage"), 0)))
+				state["torin_hollowed"] = true
+			if _is_true(state.get("gatehouse_open")) and str(raw_world.get("seraphina_mark", "")).is_empty():
+				world["seraphina_mark"] = "gatehouse_winch"
+		"ch2_tower":
+			if _is_true(state.get("boss_dead")):
+				state["bell_fallen"] = true
+				world["belfry_shaft_open"] = true
+			elif _is_true(world.get("belfry_shaft_open")):
+				world["belfry_shaft_open"] = false
+			if not raw_world.has("malcor_departed"):
+				var wards: Variant = state.get("wards")
+				var shattered := {}
+				if wards is Array:
+					for ward: Variant in wards:
+						shattered[str(ward)] = true
+				if story_flags.has("npc_malcor_choir") or shattered.size() >= 3:
+					world["malcor_departed"] = true
+		"ch3_kiln":
+			if _is_true(state.get("great_gate_open")):
+				state["gate_turns"] = 3
+				state["act_complete"] = true
+			if _is_true(state.get("gauntlet_triggered")) and str(raw_world.get("seraphina_mark", "")).is_empty():
+				world["seraphina_mark"] = "kiln_safe_gantry"
+
+static func _chapter_key(key: Variant) -> String:
+	if key is int:
+		return chapter_id_for_stage(key)
+	var text := str(key)
+	if text.is_valid_int():
+		return chapter_id_for_stage(text.to_int())
+	return text
+
+# Keep a saved value only when it matches the default's JSON type.
+static func _coerce(value: Variant, fallback: Variant) -> Variant:
+	if fallback is bool:
+		return value if value is bool else fallback
+	if fallback is int:
+		if not _is_number(value):
+			return fallback
+		return int(value) if float(value) == floorf(float(value)) else float(value)
+	if fallback is float:
+		return float(value) if _is_number(value) else fallback
+	if fallback is String or fallback is StringName:
+		return str(value) if value is String or value is StringName else fallback
+	if fallback is Array:
+		return value.duplicate(true) if value is Array else fallback
+	if fallback is Dictionary:
+		return value.duplicate(true) if value is Dictionary else fallback
+	return _copy(value)
+
+static func _is_true(value: Variant) -> bool:
+	return value is bool and value
+
+static func _copy(value: Variant) -> Variant:
+	if value is Array or value is Dictionary:
+		return value.duplicate(true)
+	return value
+
+static func _clean_sequences(value: Variant) -> Dictionary:
+	var sequences := {}
+	if value is Dictionary:
+		for id: Variant in value:
+			if _is_true(value[id]) and not str(id).is_empty():
+				sequences[str(id)] = true
+	return sequences
 
 static func has_checkpoint() -> bool:
 	return not read_save(true).is_empty()
