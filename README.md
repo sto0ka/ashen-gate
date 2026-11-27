@@ -12,6 +12,8 @@ A native Linux dark-fantasy FPS built in **Godot 4.7.2 (Forward+ Vulkan)** combi
 
 The launcher uses Godot 4.7.2 if installed, otherwise the bundled Linux runtime or a one-time download of the official Linux runtime.
 
+Read the full development post on [breesquared.com](https://breesquared.com/posts/ashen-gate/).
+
 ## Highlights
 
 - **Uninterrupted Diegetic Storytelling (`StoryDirector`)** — Zero cutscenes and zero camera hijacks. Characters (**Archivist Seraphina**, **Brother Torin**, and **Lord Malcor**) walk, gesture, speak in spatial 3D, and react across physical architecture, speaking tubes, murals, and acoustic echoes.
